@@ -440,3 +440,158 @@ func TestMustMarshal_FixedShapeProducesValidJSON(t *testing.T) {
 		t.Errorf("block_reason round-trip failed: got %q", parsed["block_reason"])
 	}
 }
+
+// specCanonicalPairs is the ground truth from docs/specs/block-reason-header.md.
+// Every Reason in validReasons MUST appear here with its spec-canonical
+// (Severity, Retry) pair. The vocabulary-coverage test below enforces that
+// adding a Reason without updating this table is a build break, so the spec
+// table and the helper functions cannot drift apart in either direction.
+var specCanonicalPairs = map[Reason]struct {
+	severity Severity
+	retry    Retry
+}{
+	// Egress / network layer.
+	SchemeBlocked:    {SeverityWarn, RetryNone},
+	DomainBlocklist:  {SeverityCritical, RetryPolicy},
+	SSRFPrivateIP:    {SeverityCritical, RetryNone},
+	SSRFMetadata:     {SeverityCritical, RetryNone},
+	SSRFDNSRebind:    {SeverityCritical, RetryTransient},
+	PathEntropy:      {SeverityWarn, RetryPolicy},
+	SubdomainEntropy: {SeverityWarn, RetryPolicy},
+	URLLength:        {SeverityWarn, RetryPolicy},
+	RateLimit:        {SeverityWarn, RetryTransient},
+	DataBudget:       {SeverityWarn, RetryPolicy},
+
+	// Content / payload layer.
+	DLPMatch:         {SeverityCritical, RetryNone},
+	PromptInjection:  {SeverityCritical, RetryNone},
+	RedactionFailure: {SeverityCritical, RetryTransient},
+	MediaPolicy:      {SeverityWarn, RetryPolicy},
+
+	// MCP / tool layer.
+	ToolPolicyDeny:   {SeverityCritical, RetryPolicy},
+	ToolChainBlocked: {SeverityCritical, RetryNone},
+	ToolPoisoning:    {SeverityCritical, RetryNone},
+	SessionBinding:   {SeverityCritical, RetryPolicy},
+
+	// Posture / runtime layer.
+	AirlockActive:          {SeverityCritical, RetryTransient},
+	KillSwitchActive:       {SeverityCritical, RetryTransient},
+	EnvelopeVerifyFailed:   {SeverityCritical, RetryNone},
+	OutboundEnvelopeFailed: {SeverityCritical, RetryTransient},
+	RedirectScanDenied:     {SeverityCritical, RetryNone},
+	AuthorityMismatch:      {SeverityCritical, RetryPolicy},
+	EscalationLevel:        {SeverityCritical, RetryTransient},
+	SessionAnomaly:         {SeverityCritical, RetryTransient},
+	CrossRequestDeny:       {SeverityCritical, RetryNone},
+	CompressedResponse:     {SeverityWarn, RetryPolicy},
+	BrowserShieldOversize:  {SeverityWarn, RetryPolicy},
+
+	// Generic.
+	ParseError:         {SeverityWarn, RetryNone},
+	Timeout:            {SeverityWarn, RetryTransient},
+	PatternUnavailable: {SeverityWarn, RetryTransient},
+	NotEnabled:         {SeverityInfo, RetryPolicy},
+	BadRequest:         {SeverityInfo, RetryNone},
+
+	// Internal sentinel.
+	BlockReasonOverflow: {SeverityWarn, RetryTransient},
+}
+
+// TestSpecCanonicalPairs_VocabularyCoverage asserts the test ground-truth
+// table is exhaustive: every Reason in validReasons has an entry, and the
+// table has no entries that are not in validReasons. This guarantees adding
+// a new Reason cannot silently bypass the spec-conformance test below.
+func TestSpecCanonicalPairs_VocabularyCoverage(t *testing.T) {
+	t.Parallel()
+	for reason := range validReasons {
+		if _, ok := specCanonicalPairs[reason]; !ok {
+			t.Errorf("Reason %q is in validReasons but missing from specCanonicalPairs (update docs/specs/block-reason-header.md and the test table together)", reason)
+		}
+	}
+	for reason := range specCanonicalPairs {
+		if _, ok := validReasons[reason]; !ok {
+			t.Errorf("Reason %q is in specCanonicalPairs but not in validReasons (stale test entry?)", reason)
+		}
+	}
+}
+
+func TestSeverityFor_AllVocabulary(t *testing.T) {
+	t.Parallel()
+	for reason, want := range specCanonicalPairs {
+		t.Run(string(reason), func(t *testing.T) {
+			got := SeverityFor(reason)
+			if got != want.severity {
+				t.Fatalf("SeverityFor(%q) = %q, want %q (spec)", reason, got, want.severity)
+			}
+		})
+	}
+	// Unknown reason fails closed to critical.
+	if got := SeverityFor(Reason("not_a_real_reason")); got != SeverityCritical {
+		t.Fatalf("SeverityFor unknown = %q, want SeverityCritical (fail-closed)", got)
+	}
+}
+
+func TestRetryFor_AllVocabulary(t *testing.T) {
+	t.Parallel()
+	for reason, want := range specCanonicalPairs {
+		t.Run(string(reason), func(t *testing.T) {
+			got := RetryFor(reason)
+			if got != want.retry {
+				t.Fatalf("RetryFor(%q) = %q, want %q (spec)", reason, got, want.retry)
+			}
+		})
+	}
+	// Unknown reason fails closed to none.
+	if got := RetryFor(Reason("not_a_real_reason")); got != RetryNone {
+		t.Fatalf("RetryFor unknown = %q, want RetryNone (fail-closed)", got)
+	}
+}
+
+func TestNewForReason_BuildsValidInfoForEveryReason(t *testing.T) {
+	t.Parallel()
+	for reason := range validReasons {
+		t.Run(string(reason), func(t *testing.T) {
+			info, err := NewForReason(reason)
+			if err != nil {
+				t.Fatalf("NewForReason(%q): %v", reason, err)
+			}
+			if info.Reason != reason {
+				t.Fatalf("info.Reason = %q, want %q", info.Reason, reason)
+			}
+			if info.Severity != SeverityFor(reason) {
+				t.Fatalf("info.Severity = %q, want SeverityFor(%q) = %q",
+					info.Severity, reason, SeverityFor(reason))
+			}
+			if info.Retry != RetryFor(reason) {
+				t.Fatalf("info.Retry = %q, want RetryFor(%q) = %q",
+					info.Retry, reason, RetryFor(reason))
+			}
+		})
+	}
+}
+
+func TestNewForReason_InvalidReasonRejects(t *testing.T) {
+	t.Parallel()
+	if _, err := NewForReason(Reason("not_a_real_reason")); err == nil {
+		t.Fatal("NewForReason on unknown reason expected error, got nil")
+	}
+}
+
+func TestMustNewForReason_PanicsOnInvalid(t *testing.T) {
+	t.Parallel()
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("MustNewForReason on unknown reason expected panic, got nil")
+		}
+	}()
+	_ = MustNewForReason(Reason("not_a_real_reason"))
+}
+
+func TestMustNewForReason_HappyPath(t *testing.T) {
+	t.Parallel()
+	info := MustNewForReason(DLPMatch)
+	if info.Reason != DLPMatch {
+		t.Fatalf("info.Reason = %q, want %q", info.Reason, DLPMatch)
+	}
+}
