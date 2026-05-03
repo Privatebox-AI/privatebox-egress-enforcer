@@ -110,6 +110,7 @@ func runShadow(cmd *cobra.Command, flags shadowFlags) error {
 	records, _, _, _, err := capture.LoadAndReplayWithOptions(cfg, sessionsDir, capture.ReplayOptions{
 		EscrowPrivateKey: escrow,
 		Contract:         &env.Body,
+		SessionFilter:    shadowSessionFilter(flags),
 	})
 	if err != nil {
 		return fmt.Errorf("learn shadow: replay captures: %w", err)
@@ -223,7 +224,51 @@ func resolveShadowSessions(cfg *config.Config, flags shadowFlags) (string, error
 	if !filepath.IsAbs(filepath.Clean(cfg.Learn.CaptureDir)) {
 		return "", errRelativeCaptureDir
 	}
-	return checkedReadDir(filepath.Join(cfg.Learn.CaptureDir, flags.agent))
+	root, err := checkedReadDir(cfg.Learn.CaptureDir)
+	if err != nil {
+		return "", err
+	}
+	matched, err := hasMatchingCaptureSession(root, flags.agent)
+	if err != nil {
+		return "", fmt.Errorf("%w: scan capture sessions: %w", ErrInvalidCandidate, err)
+	}
+	if !matched {
+		return "", fmt.Errorf("%w: no capture sessions matched agent %q", ErrInvalidCandidate, flags.agent)
+	}
+	return root, nil
+}
+
+func shadowSessionFilter(flags shadowFlags) func(name, sessionDir string) bool {
+	if flags.sessionsDir != "" {
+		return nil
+	}
+	return func(sessionName, sessionDir string) bool {
+		if !captureSessionNameMatchesAgent(sessionName, flags.agent) {
+			return false
+		}
+		// Defense in depth: name-prefix match alone lets a planted sibling
+		// directory poison shadow replay. Require the first capture entry's
+		// self-attested agent to match before the session is replayed against
+		// the candidate contract.
+		return validateCaptureSessionDir(sessionDir, flags.agent)
+	}
+}
+
+func hasMatchingCaptureSession(root, agent string) (bool, error) {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return false, err
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() || !captureSessionNameMatchesAgent(entry.Name(), agent) {
+			continue
+		}
+		if !validateCaptureSessionDir(filepath.Join(root, entry.Name()), agent) {
+			continue
+		}
+		return true, nil
+	}
+	return false, nil
 }
 
 func checkedReadDir(path string) (string, error) {

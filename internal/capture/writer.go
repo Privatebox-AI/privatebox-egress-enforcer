@@ -310,6 +310,7 @@ func captureEventKind(surface string) string {
 func (w *Writer) buildSummary(
 	surface, subsurface, configHash, agent, profile string,
 	actionClass string,
+	sessionIDOriginal string,
 	scannerInput string,
 	payloadComplete bool,
 	transformKind, wirePayload string,
@@ -318,6 +319,14 @@ func (w *Writer) buildSummary(
 	rawFindings, effectiveFindings []Finding,
 	effectiveAction, outcome, skipReason string,
 ) CaptureSummary {
+	// Default effectiveAction to "allow" when empty so shadow replay can
+	// compute a non-empty original_verdict. Capture call sites that leave
+	// EffectiveAction empty for clean traffic should be migrated to set
+	// config.ActionAllow explicitly; this defensive default keeps the
+	// shadow pipeline functional in the meantime.
+	if effectiveAction == "" {
+		effectiveAction = ActionAllow
+	}
 	s := CaptureSummary{
 		CaptureSchemaVersion: CaptureSchemaV1,
 		Surface:              surface,
@@ -329,6 +338,7 @@ func (w *Writer) buildSummary(
 		Agent:                agent,
 		Profile:              profile,
 		ActionClass:          actionClass,
+		SessionIDOriginal:    sessionIDOriginal,
 		PayloadComplete:      payloadComplete,
 		TransformKind:        transformKind,
 		Request:              req,
@@ -381,6 +391,17 @@ func (w *Writer) buildSummary(
 	return s
 }
 
+// normalizeEffectiveAction returns ActionAllow when the input is empty,
+// matching the writer's defensive default. Observe* call sites use this
+// before constructing recorder.Entry.Summary so the Summary tail and the
+// CaptureSummary.EffectiveAction field always agree on the same value.
+func normalizeEffectiveAction(s string) string {
+	if s == "" {
+		return ActionAllow
+	}
+	return s
+}
+
 // ObserveURLVerdict implements CaptureObserver for URL pipeline verdicts.
 func (w *Writer) ObserveURLVerdict(_ context.Context, rec *URLVerdictRecord) {
 	// URL verdicts have no separate scanner input; the URL is the input.
@@ -392,14 +413,15 @@ func (w *Writer) ObserveURLVerdict(_ context.Context, rec *URLVerdictRecord) {
 			Type:      EntryTypeCapture,
 			EventKind: captureEventKind(SurfaceURL),
 			Transport: rec.Transport,
-			Summary:   rec.Subsurface + ":" + rec.EffectiveAction,
+			Summary:   rec.Subsurface + ":" + normalizeEffectiveAction(rec.EffectiveAction),
 		},
 		summary: w.buildSummary(
 			SurfaceURL, rec.Subsurface, rec.ConfigHash, rec.Agent, rec.Profile,
 			rec.ActionClass,
+			rec.SessionIDOriginal,
 			scannerInput, true, TransformRaw, "", nil,
 			rec.Request, rec.RawFindings, rec.EffectiveFindings,
-			rec.EffectiveAction, rec.Outcome, rec.SkipReason,
+			normalizeEffectiveAction(rec.EffectiveAction), rec.Outcome, rec.SkipReason,
 		),
 		scannerInput: scannerInput,
 	})
@@ -415,14 +437,15 @@ func (w *Writer) ObserveResponseVerdict(_ context.Context, rec *ResponseVerdictR
 			Type:      EntryTypeCapture,
 			EventKind: captureEventKind(SurfaceResponse),
 			Transport: rec.Transport,
-			Summary:   rec.Subsurface + ":" + rec.EffectiveAction,
+			Summary:   rec.Subsurface + ":" + normalizeEffectiveAction(rec.EffectiveAction),
 		},
 		summary: w.buildSummary(
 			SurfaceResponse, rec.Subsurface, rec.ConfigHash, rec.Agent, rec.Profile,
 			rec.ActionClass,
+			rec.SessionIDOriginal,
 			"", false, rec.TransformKind, wire, nil,
 			rec.Request, rec.RawFindings, rec.EffectiveFindings,
-			rec.EffectiveAction, rec.Outcome, rec.SkipReason,
+			normalizeEffectiveAction(rec.EffectiveAction), rec.Outcome, rec.SkipReason,
 		),
 		wirePayload: wire,
 	})
@@ -437,14 +460,15 @@ func (w *Writer) ObserveDLPVerdict(_ context.Context, rec *DLPVerdictRecord) {
 			Type:      EntryTypeCapture,
 			EventKind: captureEventKind(SurfaceDLP),
 			Transport: rec.Transport,
-			Summary:   rec.Subsurface + ":" + rec.EffectiveAction,
+			Summary:   rec.Subsurface + ":" + normalizeEffectiveAction(rec.EffectiveAction),
 		},
 		summary: w.buildSummary(
 			SurfaceDLP, rec.Subsurface, rec.ConfigHash, rec.Agent, rec.Profile,
 			rec.ActionClass,
+			rec.SessionIDOriginal,
 			rec.ScannerInput, false, rec.TransformKind, "", nil,
 			rec.Request, rec.RawFindings, rec.EffectiveFindings,
-			rec.EffectiveAction, rec.Outcome, rec.SkipReason,
+			normalizeEffectiveAction(rec.EffectiveAction), rec.Outcome, rec.SkipReason,
 		),
 		scannerInput: rec.ScannerInput,
 	})
@@ -459,14 +483,15 @@ func (w *Writer) ObserveCEEVerdict(_ context.Context, rec *CEERecord) {
 			Type:      EntryTypeCapture,
 			EventKind: captureEventKind(SurfaceCEE),
 			Transport: rec.Transport,
-			Summary:   rec.Subsurface + ":" + rec.EffectiveAction,
+			Summary:   rec.Subsurface + ":" + normalizeEffectiveAction(rec.EffectiveAction),
 		},
 		summary: w.buildSummary(
 			SurfaceCEE, rec.Subsurface, rec.ConfigHash, rec.Agent, rec.Profile,
 			rec.ActionClass,
+			rec.SessionIDOriginal,
 			rec.ScannerInput, false, rec.TransformKind, "", nil,
 			rec.Request, rec.RawFindings, rec.EffectiveFindings,
-			rec.EffectiveAction, rec.Outcome, rec.SkipReason,
+			normalizeEffectiveAction(rec.EffectiveAction), rec.Outcome, rec.SkipReason,
 		),
 		scannerInput: rec.ScannerInput,
 	})
@@ -481,14 +506,15 @@ func (w *Writer) ObserveToolPolicyVerdict(_ context.Context, rec *ToolPolicyReco
 			Type:      EntryTypeCapture,
 			EventKind: captureEventKind(SurfaceToolPolicy),
 			Transport: rec.Transport,
-			Summary:   rec.Subsurface + ":" + rec.EffectiveAction,
+			Summary:   rec.Subsurface + ":" + normalizeEffectiveAction(rec.EffectiveAction),
 		},
 		summary: w.buildSummary(
 			SurfaceToolPolicy, rec.Subsurface, rec.ConfigHash, rec.Agent, rec.Profile,
 			rec.ActionClass,
+			rec.SessionIDOriginal,
 			"", rec.Request.ToolArgsJSON != "", TransformRaw, "", rec.BatchIndex,
 			rec.Request, rec.RawFindings, rec.EffectiveFindings,
-			rec.EffectiveAction, rec.Outcome, rec.SkipReason,
+			normalizeEffectiveAction(rec.EffectiveAction), rec.Outcome, rec.SkipReason,
 		),
 	})
 }
@@ -502,14 +528,15 @@ func (w *Writer) ObserveToolScanVerdict(_ context.Context, rec *ToolScanRecord) 
 			Type:      EntryTypeCapture,
 			EventKind: captureEventKind(SurfaceToolScan),
 			Transport: rec.Transport,
-			Summary:   rec.Subsurface + ":" + rec.EffectiveAction,
+			Summary:   rec.Subsurface + ":" + normalizeEffectiveAction(rec.EffectiveAction),
 		},
 		summary: w.buildSummary(
 			SurfaceToolScan, rec.Subsurface, rec.ConfigHash, rec.Agent, rec.Profile,
 			rec.ActionClass,
+			rec.SessionIDOriginal,
 			rec.ScannerInput, false, rec.TransformKind, "", rec.BatchIndex,
 			rec.Request, rec.RawFindings, rec.EffectiveFindings,
-			rec.EffectiveAction, rec.Outcome, rec.SkipReason,
+			normalizeEffectiveAction(rec.EffectiveAction), rec.Outcome, rec.SkipReason,
 		),
 		scannerInput: rec.ScannerInput,
 	})

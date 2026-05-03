@@ -2509,15 +2509,19 @@ func (p *Proxy) handleFetch(w http.ResponseWriter, r *http.Request) {
 	// Capture observer: record URL verdict for policy replay.
 	urlFindings := urlResultToFindings(result)
 	urlOutcome := captureOutcome(config.ActionBlock, result.Allowed)
-	urlAction := ""
+	urlAction := config.ActionAllow
 	if !result.Allowed {
 		urlAction = config.ActionBlock
 	}
 	p.captureObs.ObserveURLVerdict(r.Context(), &capture.URLVerdictRecord{
 		Subsurface:        "fetch_url",
 		Transport:         "fetch",
+		SessionID:         captureSessionKey(agent, clientIP),
+		SessionIDOriginal: captureSessionKeyOriginal(agent, clientIP),
 		RequestID:         requestID,
+		ConfigHash:        cfg.CanonicalPolicyHash(),
 		Agent:             agent,
+		Profile:           id.Profile,
 		Request:           capture.CaptureRequest{Method: r.Method, URL: displayURL},
 		RawFindings:       urlFindings,
 		EffectiveFindings: urlFindings,
@@ -2756,21 +2760,25 @@ func (p *Proxy) handleFetch(w http.ResponseWriter, r *http.Request) {
 
 	// Capture observer: record header DLP verdict for policy replay.
 	{
-		hdrAction := ""
+		hdrAction := config.ActionAllow
 		if headerBlocked {
 			hdrAction = config.ActionBlock
 		} else if headerHadFinding {
 			hdrAction = config.ActionWarn
 		}
 		p.captureObs.ObserveDLPVerdict(r.Context(), &capture.DLPVerdictRecord{
-			Subsurface:      "dlp_fetch_header",
-			Transport:       "fetch",
-			RequestID:       requestID,
-			Agent:           agent,
-			Request:         capture.CaptureRequest{Method: r.Method, URL: displayURL},
-			TransformKind:   capture.TransformHeaderValue,
-			EffectiveAction: hdrAction,
-			Outcome:         captureOutcome(hdrAction, !headerHadFinding),
+			Subsurface:        "dlp_fetch_header",
+			Transport:         "fetch",
+			SessionID:         captureSessionKey(agent, clientIP),
+			SessionIDOriginal: captureSessionKeyOriginal(agent, clientIP),
+			RequestID:         requestID,
+			ConfigHash:        cfg.CanonicalPolicyHash(),
+			Agent:             agent,
+			Profile:           id.Profile,
+			Request:           capture.CaptureRequest{Method: r.Method, URL: displayURL},
+			TransformKind:     capture.TransformHeaderValue,
+			EffectiveAction:   hdrAction,
+			Outcome:           captureOutcome(hdrAction, !headerHadFinding),
 		})
 	}
 
@@ -2911,7 +2919,7 @@ func (p *Proxy) handleFetch(w http.ResponseWriter, r *http.Request) {
 
 		// Capture observer: record CEE verdict for policy replay.
 		ceeFindings := ceeResultToFindings(ceeRes)
-		ceeAction := ""
+		ceeAction := config.ActionAllow
 		if ceeRes.Blocked {
 			ceeAction = config.ActionBlock
 		} else if ceeRes.EntropyHit || ceeRes.FragmentHit {
@@ -2920,8 +2928,12 @@ func (p *Proxy) handleFetch(w http.ResponseWriter, r *http.Request) {
 		p.captureObs.ObserveCEEVerdict(r.Context(), &capture.CEERecord{
 			Subsurface:        "cee_fetch",
 			Transport:         "fetch",
+			SessionID:         captureSessionKey(agent, clientIP),
+			SessionIDOriginal: captureSessionKeyOriginal(agent, clientIP),
 			RequestID:         requestID,
+			ConfigHash:        cfg.CanonicalPolicyHash(),
 			Agent:             agent,
+			Profile:           id.Profile,
 			Request:           capture.CaptureRequest{Method: r.Method, URL: displayURL},
 			TransformKind:     capture.TransformCEEWindow,
 			RawFindings:       ceeFindings,
@@ -3417,13 +3429,17 @@ func (p *Proxy) handleFetch(w http.ResponseWriter, r *http.Request) {
 			respAction = config.ActionWarn
 		}
 		if scanResult.Clean {
-			respAction = ""
+			respAction = config.ActionAllow
 		}
 		p.captureObs.ObserveResponseVerdict(r.Context(), &capture.ResponseVerdictRecord{
 			Subsurface:        "response_fetch",
 			Transport:         "fetch",
+			SessionID:         captureSessionKey(agent, clientIP),
+			SessionIDOriginal: captureSessionKeyOriginal(agent, clientIP),
 			RequestID:         requestID,
+			ConfigHash:        cfg.CanonicalPolicyHash(),
 			Agent:             agent,
+			Profile:           id.Profile,
 			Request:           capture.CaptureRequest{Method: r.Method, URL: displayURL},
 			TransformKind:     capture.TransformReadability,
 			RawFindings:       responseMatchesToFindings(scanResult.Matches, respAction),

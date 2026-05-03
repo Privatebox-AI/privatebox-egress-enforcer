@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"mime"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -340,7 +341,7 @@ func (rp *ReverseProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 
 		// Capture observer: record reverse proxy URL DLP verdict for policy replay.
 		{
-			urlDLPAction := ""
+			urlDLPAction := config.ActionAllow
 			if !pathDLP.Clean {
 				urlDLPAction = cfg.RequestBodyScanning.Action
 				if urlDLPAction == "" {
@@ -348,13 +349,17 @@ func (rp *ReverseProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 				}
 			}
 			rp.captureObs.ObserveDLPVerdict(r.Context(), &capture.DLPVerdictRecord{
-				Subsurface:      "dlp_reverse_url",
-				Transport:       "reverse",
-				Request:         capture.CaptureRequest{Method: r.Method, URL: r.URL.String()},
-				TransformKind:   capture.TransformRaw,
-				RawFindings:     dlpMatchesToFindings(pathDLP.Matches),
-				EffectiveAction: urlDLPAction,
-				Outcome:         captureOutcome(urlDLPAction, pathDLP.Clean),
+				Subsurface:        "dlp_reverse_url",
+				Transport:         "reverse",
+				SessionID:         captureSessionKey(r.Header.Get("X-Pipelock-Agent"), reverseClientIP(r)),
+				SessionIDOriginal: captureSessionKeyOriginal(r.Header.Get("X-Pipelock-Agent"), reverseClientIP(r)),
+				ConfigHash:        cfg.CanonicalPolicyHash(),
+				Profile:           edition.ProfileDefault,
+				Request:           capture.CaptureRequest{Method: r.Method, URL: r.URL.String()},
+				TransformKind:     capture.TransformRaw,
+				RawFindings:       dlpMatchesToFindings(pathDLP.Matches),
+				EffectiveAction:   urlDLPAction,
+				Outcome:           captureOutcome(urlDLPAction, pathDLP.Clean),
 			})
 		}
 
@@ -531,7 +536,7 @@ func (rp *ReverseProxyHandler) scanRequest(w http.ResponseWriter, r *http.Reques
 
 	// Capture observer: record reverse proxy request DLP verdict for policy replay.
 	{
-		bodyAction := ""
+		bodyAction := config.ActionAllow
 		if !result.Clean {
 			bodyAction = result.Action
 			if bodyAction == "" {
@@ -542,13 +547,17 @@ func (rp *ReverseProxyHandler) scanRequest(w http.ResponseWriter, r *http.Reques
 			}
 		}
 		rp.captureObs.ObserveDLPVerdict(r.Context(), &capture.DLPVerdictRecord{
-			Subsurface:      "dlp_reverse_request",
-			Transport:       "reverse",
-			Request:         capture.CaptureRequest{Method: r.Method, URL: r.URL.String()},
-			TransformKind:   capture.TransformJoinedFields,
-			RawFindings:     bodyScanToFindings(result),
-			EffectiveAction: bodyAction,
-			Outcome:         captureOutcome(bodyAction, result.Clean),
+			Subsurface:        "dlp_reverse_request",
+			Transport:         "reverse",
+			SessionID:         captureSessionKey(r.Header.Get("X-Pipelock-Agent"), reverseClientIP(r)),
+			SessionIDOriginal: captureSessionKeyOriginal(r.Header.Get("X-Pipelock-Agent"), reverseClientIP(r)),
+			ConfigHash:        cfg.CanonicalPolicyHash(),
+			Profile:           edition.ProfileDefault,
+			Request:           capture.CaptureRequest{Method: r.Method, URL: r.URL.String()},
+			TransformKind:     capture.TransformJoinedFields,
+			RawFindings:       bodyScanToFindings(result),
+			EffectiveAction:   bodyAction,
+			Outcome:           captureOutcome(bodyAction, result.Clean),
 		})
 	}
 
@@ -973,28 +982,6 @@ func (rp *ReverseProxyHandler) modifyResponse(resp *http.Response) error {
 	text := string(body)
 	result := sc.ScanResponse(resp.Request.Context(), text)
 
-	// Capture observer: record reverse proxy response scan verdict for policy replay.
-	// Apply exempt override before capture so the recorded action matches runtime.
-	{
-		revAction := cfg.ResponseScanning.Action
-		if revRespExempt {
-			revAction = config.ActionWarn
-		}
-		if result.Clean {
-			revAction = ""
-		}
-		rp.captureObs.ObserveResponseVerdict(resp.Request.Context(), &capture.ResponseVerdictRecord{
-			Subsurface:        "response_reverse",
-			Transport:         "reverse",
-			Request:           capture.CaptureRequest{Method: resp.Request.Method, URL: resp.Request.URL.String()},
-			TransformKind:     capture.TransformRaw,
-			RawFindings:       responseMatchesToFindings(result.Matches, revAction),
-			EffectiveFindings: responseMatchesToFindings(result.Matches, revAction),
-			EffectiveAction:   revAction,
-			Outcome:           captureOutcome(revAction, result.Clean),
-		})
-	}
-
 	// Filter out suppressed findings (parity with fetch proxy).
 	if !result.Clean && len(cfg.Suppress) > 0 {
 		var kept []scanner.ResponseMatch
@@ -1007,6 +994,32 @@ func (rp *ReverseProxyHandler) modifyResponse(resp *http.Response) error {
 		}
 		result.Matches = kept
 		result.Clean = len(kept) == 0
+	}
+
+	// Capture observer: record reverse proxy response scan verdict for policy replay.
+	// Runs after suppression so the recorded action matches runtime.
+	{
+		revAction := cfg.ResponseScanning.Action
+		if revRespExempt {
+			revAction = config.ActionWarn
+		}
+		if result.Clean {
+			revAction = config.ActionAllow
+		}
+		rp.captureObs.ObserveResponseVerdict(resp.Request.Context(), &capture.ResponseVerdictRecord{
+			Subsurface:        "response_reverse",
+			Transport:         "reverse",
+			SessionID:         captureSessionKey(resp.Request.Header.Get("X-Pipelock-Agent"), reverseClientIP(resp.Request)),
+			SessionIDOriginal: captureSessionKeyOriginal(resp.Request.Header.Get("X-Pipelock-Agent"), reverseClientIP(resp.Request)),
+			ConfigHash:        cfg.CanonicalPolicyHash(),
+			Profile:           edition.ProfileDefault,
+			Request:           capture.CaptureRequest{Method: resp.Request.Method, URL: resp.Request.URL.String()},
+			TransformKind:     capture.TransformRaw,
+			RawFindings:       responseMatchesToFindings(result.Matches, revAction),
+			EffectiveFindings: responseMatchesToFindings(result.Matches, revAction),
+			EffectiveAction:   revAction,
+			Outcome:           captureOutcome(revAction, result.Clean),
+		})
 	}
 
 	if result.Clean {
@@ -1183,4 +1196,14 @@ func isBinaryMIME(ct string) bool {
 	return strings.HasPrefix(mediaType, "image/") ||
 		strings.HasPrefix(mediaType, "audio/") ||
 		strings.HasPrefix(mediaType, "video/")
+}
+
+// reverseClientIP extracts a client IP for capture session keying. Falls
+// back to RemoteAddr when SplitHostPort fails (e.g., raw IP without port
+// from a unix socket or test fixture).
+func reverseClientIP(r *http.Request) string {
+	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		return host
+	}
+	return r.RemoteAddr
 }
