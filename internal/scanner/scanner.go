@@ -184,6 +184,26 @@ type Scanner struct {
 	closed  bool
 	inUse   sync.WaitGroup
 	drained atomic.Bool
+
+	// heartbeat is invoked at the end of every Scan() to feed the
+	// wedge-detection watchdog. atomic.Pointer keeps SetHeartbeat
+	// race-safe even though production wires it before Start.
+	heartbeat atomic.Pointer[heartbeatFn]
+}
+
+// heartbeatFn wraps a func() so it can live behind atomic.Pointer (which
+// requires a concrete pointer-to-struct, not a pointer-to-function).
+type heartbeatFn struct{ fn func() }
+
+// SetHeartbeat installs a callback invoked after every successful Scan.
+// Pass nil to detach. Cheap; safe to call concurrently with Scan because
+// the holder is read via atomic.Pointer.
+func (s *Scanner) SetHeartbeat(fn func()) {
+	if fn == nil {
+		s.heartbeat.Store(nil)
+		return
+	}
+	s.heartbeat.Store(&heartbeatFn{fn: fn})
 }
 
 // scannerCloseDrainTimeout caps how long Close() waits for in-flight scans
@@ -681,7 +701,18 @@ func HintForBlock(r *Result) string {
 // Scan checks a URL against all scanners and returns the result.
 // Blocked results include a Hint field with actionable guidance.
 // Fail-closed: nil or already-cancelled contexts are rejected before scanning.
+//
+// Heartbeat fires on EVERY return (including the early fail-closed path
+// for nil/cancelled contexts) via defer. The watchdog interprets the
+// heartbeat as "Scan is making progress, not wedged in a regex"; a fast
+// reject is still progress and must register so a flood of cancelled-
+// context probes does not falsely trip the wedge detector.
 func (s *Scanner) Scan(ctx context.Context, rawURL string) Result {
+	defer func() {
+		if h := s.heartbeat.Load(); h != nil {
+			h.fn()
+		}
+	}()
 	if ctx == nil || ctx.Err() != nil {
 		return Result{
 			Allowed: false,
