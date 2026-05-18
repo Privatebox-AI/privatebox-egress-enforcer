@@ -6,6 +6,7 @@ package setup
 import (
 	"fmt"
 	"io"
+	"regexp"
 	"strings"
 )
 
@@ -64,16 +65,28 @@ func runSidecarVerify(w io.Writer, result *sidecarPatchResult, opts sidecarOptio
 	if !strings.Contains(result.AgentNetworkPolicyYAML, "matchLabels") || !strings.Contains(result.AgentNetworkPolicyYAML, "podSelector") {
 		failed = append(failed, "agent NetworkPolicy missing selectors")
 	}
-	if strings.Contains(result.AgentNetworkPolicyYAML, "port: 80") || strings.Contains(result.AgentNetworkPolicyYAML, "port: 443") {
+	if networkPolicyHasPort(result.AgentNetworkPolicyYAML, 80) || networkPolicyHasPort(result.AgentNetworkPolicyYAML, 443) {
 		failed = append(failed, "agent NetworkPolicy still allows direct web egress")
 	}
-	if !strings.Contains(result.AgentNetworkPolicyYAML, fmt.Sprintf("port: %d", sidecarHealthPort)) {
+	if !networkPolicyHasPort(result.AgentNetworkPolicyYAML, sidecarHealthPort) {
 		failed = append(failed, "agent NetworkPolicy does not allow proxy port")
 	}
-	if !strings.Contains(result.ProxyNetworkPolicyYAML, fmt.Sprintf("port: %d", sidecarHealthPort)) {
+	if result.MCPUpstream != "" && !networkPolicyHasPort(result.AgentNetworkPolicyYAML, sidecarMCPPort) {
+		failed = append(failed, "agent NetworkPolicy does not allow MCP proxy port")
+	}
+	if !networkPolicyHasPort(result.ProxyNetworkPolicyYAML, sidecarHealthPort) {
 		failed = append(failed, "proxy NetworkPolicy does not allow agent ingress on proxy port")
 	}
-	if !strings.Contains(result.ProxyNetworkPolicyYAML, "port: 80") || !strings.Contains(result.ProxyNetworkPolicyYAML, "port: 443") {
+	if result.MCPUpstream != "" {
+		if !networkPolicyHasPort(result.ProxyNetworkPolicyYAML, sidecarMCPPort) {
+			failed = append(failed, "proxy NetworkPolicy does not allow agent ingress on MCP proxy port")
+		}
+		if upstreamPort := mcpUpstreamPolicyPort(result.MCPUpstream); upstreamPort != 0 &&
+			!networkPolicyHasPort(result.ProxyNetworkPolicyYAML, upstreamPort) {
+			failed = append(failed, fmt.Sprintf("proxy NetworkPolicy does not allow MCP upstream port %d", upstreamPort))
+		}
+	}
+	if !networkPolicyHasPort(result.ProxyNetworkPolicyYAML, 80) || !networkPolicyHasPort(result.ProxyNetworkPolicyYAML, 443) {
 		failed = append(failed, "proxy NetworkPolicy does not allow web egress")
 	}
 
@@ -99,4 +112,9 @@ func runSidecarVerify(w io.Writer, result *sidecarPatchResult, opts sidecarOptio
 		Healthy: false,
 		Detail:  detail,
 	}
+}
+
+func networkPolicyHasPort(policyYAML string, port int) bool {
+	pattern := fmt.Sprintf(`(?m)^\s*-?\s*port:\s*%d\s*(?:#.*)?$`, port)
+	return regexp.MustCompile(pattern).MatchString(policyYAML)
 }
