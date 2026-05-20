@@ -31,6 +31,9 @@ An honest feature matrix and guidance on when to use what.
 | **Hot-reload** | Yes (fsnotify + SIGHUP) | No | No | No |
 | **CI/CD friendly** | Yes (exit codes, JSON output) | Yes | Limited | Yes |
 | **Testing depth** | Thousands of tests, 88%+ coverage, private adversarial suite | Public unit tests | Public unit tests | Public unit tests |
+| **Independent verifier SDKs** | First-party Go, TypeScript, Rust verifiers + standalone `pipelock-verifier` CLI + Python companion. Auditors verify signed receipts without running the firewall. | Not applicable | Not applicable | Not applicable |
+| **Host containment lifecycle** | `pipelock contain install / verify / rollback / add-tool / grant-workspace / revoke-workspace / ca-refresh` — 3-UID kernel-enforced separation with nftables owner-match, workspace ACL lifecycle, and TOFU binary-integrity pinning | No | Kernel-level, no install lifecycle | OS sandbox per session |
+| **Cross-org federation** | Inbound mediation-envelope verification, strict-default SPIFFE actors, RFC 9421 well-known signing-key directory, replay-protected nonce cache, operator trust CLI | No | No | No |
 
 ## When to Use What
 
@@ -72,7 +75,7 @@ An honest feature matrix and guidance on when to use what.
 mcp-scan has two modes: static scanning detects tool poisoning via hash comparison ("has this tool changed?"), while proxy mode monitors MCP traffic with PII/secrets guardrails. Pipelock scans bidirectionally with pattern matching, Unicode normalization, entropy analysis, and covers HTTP fetch traffic in addition to MCP. They're complementary: mcp-scan for MCP-specific auditing and guardrails, Pipelock for deep content inspection across both HTTP and MCP.
 
 ### Pipelock vs Docker MCP Gateway
-Docker MCP Gateway aggregates MCP servers and provides basic secret scanning. Pipelock provides deep content inspection (48 DLP patterns, BIP-39 seed phrase detection, 25 injection detection patterns, entropy analysis, tool poisoning). They're complementary: Pipelock could run as a Gateway interceptor for content inspection while Gateway handles routing and Docker-native lifecycle management.
+Docker MCP Gateway aggregates MCP servers and provides basic secret scanning. Pipelock provides deep content inspection (48 DLP patterns, BIP-39 seed phrase detection, 29 injection detection patterns, entropy analysis, tool poisoning, and request-body prompt-injection hard-blocking). They're complementary: Pipelock could run as a Gateway interceptor for content inspection while Gateway handles routing and Docker-native lifecycle management.
 
 ## Using Tools Together
 

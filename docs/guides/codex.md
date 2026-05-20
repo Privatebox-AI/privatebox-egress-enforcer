@@ -4,9 +4,10 @@ Codex is the coding agent you hand a real repository. It can review PRs,
 trace large codebases, research dependencies, and operate MCP tools. That
 means it sees secrets, calls tools, and follows links in untrusted content.
 
-Pipelock sits between Codex and those surfaces, scanning outbound requests,
-inbound content, and tool traffic before anything reaches the model or
-leaves your machine.
+Pipelock sits between Codex and those surfaces when MCP servers are wrapped
+and HTTP clients are routed through the proxy. It scans mediated outbound
+requests, inbound content, and tool traffic before anything reaches the model
+or leaves your machine.
 
 ## Why Codex Needs an Agent Firewall
 
@@ -32,15 +33,23 @@ connection.
 # 1. Install pipelock
 brew install luckyPipewrench/tap/pipelock
 
-# 2. Wrap an MCP server for Codex
-codex mcp add my-server \
-  -- pipelock mcp proxy --config configs/balanced.yaml \
-  -- npx -y @modelcontextprotocol/server-filesystem /tmp
+# 2. Wrap every Codex MCP server with pipelock in one shot
+pipelock codex install
 
 # 3. Run an assessment before first use
 pipelock assess init --config configs/balanced.yaml
 pipelock assess run assessment-*/
 pipelock assess finalize assessment-*/
+```
+
+`pipelock codex install` discovers Codex's MCP server entries in `~/.codex/config.toml`, rewrites each one to launch through `pipelock mcp proxy`, and is idempotent — re-running it on an already-installed setup is a no-op. Add or remove an MCP server via `codex mcp add/remove` as usual, then re-run `pipelock codex install` to wrap any new entries.
+
+For manual / per-server control, the original pattern still works:
+
+```bash
+codex mcp add my-server \
+  -- pipelock mcp proxy --config configs/balanced.yaml \
+  -- npx -y @modelcontextprotocol/server-filesystem /tmp
 ```
 
 ## MCP Proxy Mode
@@ -111,9 +120,11 @@ export HTTP_PROXY=http://127.0.0.1:8888
 export NO_PROXY=127.0.0.1,localhost
 ```
 
-This scans all outbound HTTP traffic for DLP, SSRF, and URL-based
-exfiltration. Response content is scanned for prompt injection before
-reaching the agent.
+This scans outbound HTTP traffic that honors the proxy settings for DLP,
+SSRF, and URL-based exfiltration. Response content is scanned for prompt
+injection before reaching the agent. Use `pipelock contain`, sandboxing, or
+another network boundary for tools that ignore proxy environment variables or
+open raw sockets directly.
 
 ## Running an Assessment First
 

