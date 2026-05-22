@@ -1138,6 +1138,35 @@ func (c *Config) validateToolChainDetection() error {
 			return fmt.Errorf("tool_chain_detection.pattern_overrides[%q]: invalid action %q: must be warn or block", name, action)
 		}
 	}
+	// Keep these label strings in lockstep with the chains package
+	// (internal/mcp/chains/classify.go: SensitivityUntrustedSource,
+	// SensitivitySensitiveSource, SensitivityExternalSink). The
+	// duplication is deliberate — importing chains from config would
+	// create a cycle since chains imports config for ToolChainDetection.
+	for label, patterns := range c.ToolChainDetection.SensitivityLabels {
+		switch label {
+		case "untrusted_source", "sensitive_source", "external_sink":
+			// valid
+		default:
+			return fmt.Errorf("tool_chain_detection.sensitivity_labels[%q]: invalid label: must be untrusted_source, sensitive_source, or external_sink", label)
+		}
+		if len(patterns) == 0 {
+			return fmt.Errorf("tool_chain_detection.sensitivity_labels[%q]: must contain at least one pattern (use absent label to disable instead)", label)
+		}
+		for i, rawPat := range patterns {
+			pat := strings.TrimSpace(rawPat)
+			if pat == "" {
+				return fmt.Errorf("tool_chain_detection.sensitivity_labels[%q][%d] is empty", label, i)
+			}
+			if _, err := filepath.Match(pat, "probe"); err != nil {
+				return fmt.Errorf("tool_chain_detection.sensitivity_labels[%q][%d] %q: invalid glob pattern: %w", label, i, pat, err)
+			}
+			// Persist the trimmed form so the matcher uses the normalized
+			// pattern at runtime (slice is a reference, so writing here
+			// updates the value stored on the Config).
+			patterns[i] = pat
+		}
+	}
 	return nil
 }
 
