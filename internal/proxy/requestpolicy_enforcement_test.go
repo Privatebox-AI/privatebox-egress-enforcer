@@ -695,6 +695,52 @@ func TestRequestPolicy_RedirectHopReportsRequestPolicyReason(t *testing.T) {
 	}
 }
 
+func TestRequestPolicy_RedirectHopGraphQLOverGETBenignForwards(t *testing.T) {
+	t.Parallel()
+	final := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(final.Close)
+	finalURL, err := url.Parse(final.URL)
+	if err != nil {
+		t.Fatalf("parse final URL: %v", err)
+	}
+
+	cfg := reqPolicyConfig(config.RequestPolicyRule{
+		Name:   "block-delete",
+		Action: config.ActionBlock,
+		Route: config.RequestPolicyRoute{
+			Hosts:        []string{finalURL.Hostname()},
+			Methods:      []string{http.MethodGet},
+			PathPatterns: []string{`/graphql$`},
+		},
+		GraphQL: &config.RequestPolicyGraphQL{
+			OperationTypes:    []string{"mutation"},
+			RootFieldPatterns: []string{`^deleteRecord$`},
+		},
+	})
+	p := newTestProxyWithConfig(t, cfg)
+
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		target := final.URL + "/graphql?query=" + url.QueryEscape(`query { viewer { id } }`)
+		http.Redirect(w, r, target, http.StatusFound)
+	}))
+	t.Cleanup(origin.Close)
+
+	handler := p.buildHandler(p.buildMux())
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet,
+		"/fetch?url="+url.QueryEscape(origin.URL), nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("benign GraphQL-over-GET redirect hop: status = %d, want 200", w.Code)
+	}
+	if got := w.Header().Get("X-Pipelock-Block-Reason"); got != "" {
+		t.Fatalf("benign GraphQL-over-GET redirect hop must not be blocked; got reason %q", got)
+	}
+}
+
 // --- Before-gate ordering: request_policy blocks with no contract -----------
 
 func TestRequestPolicy_EnforcesWithoutContract(t *testing.T) {
