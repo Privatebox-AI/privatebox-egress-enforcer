@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/luckyPipewrench/pipelock/internal/capture"
@@ -153,6 +154,93 @@ func TestObserveDLPVerdict_StampsEventKind(t *testing.T) {
 	if summary.ActionClass != ekActionClassWrite {
 		t.Errorf("summary.ActionClass: got %q, want %q (explicit ActionClassWrite)",
 			summary.ActionClass, ekActionClassWrite)
+	}
+}
+
+// TestObserveDLPVerdict_PropagatesRedactionRewritesApplied asserts that the
+// pre-DLP redaction-rewrite count set on the record reaches the audit
+// summary. Pre-fix, captures reported outcome=clean / transform_kind=raw
+// even when redaction had rewritten bytes, which masked the
+// allowlist_unparseable contract bug in production logs. The new field
+// surfaces "we forwarded after rewriting N values" directly on the audit
+// row.
+func TestObserveDLPVerdict_PropagatesRedactionRewritesApplied(t *testing.T) {
+	w, dir := newEventKindTestWriter(t)
+
+	w.ObserveDLPVerdict(context.Background(), &capture.DLPVerdictRecord{
+		Subsurface:               testSubsurface,
+		Transport:                testTransport,
+		SessionID:                testSessionID,
+		RequestID:                ekTestRequestID,
+		ConfigHash:               testConfigHash,
+		ActionClass:              ekActionClassWrite,
+		Request:                  capture.CaptureRequest{Method: http.MethodPost, URL: testURLVerdict},
+		TransformKind:            capture.TransformJoinedFields,
+		ScannerInput:             "field=value",
+		EffectiveAction:          testEffAction,
+		Outcome:                  capture.OutcomeBlocked,
+		RedactionRewritesApplied: 3,
+	})
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	_, summary := readCaptureSummary(t, dir)
+	if summary.RedactionRewritesApplied != 3 {
+		t.Fatalf("summary.RedactionRewritesApplied: got %d, want 3", summary.RedactionRewritesApplied)
+	}
+}
+
+// TestObserveDLPVerdict_OmitsRewriteCountWhenZero is the negative-side
+// regression: when redaction did not modify bytes (passthrough on an
+// allowlist_unparseable host, or scanner found nothing to rewrite), the
+// audit row's RedactionRewritesApplied must stay zero. Combined with the
+// json:"redaction_rewrites_applied,omitempty" tag, the field falls off the
+// wire JSON entirely so existing audit consumers see no shape change for
+// the common case.
+func TestObserveDLPVerdict_OmitsRewriteCountWhenZero(t *testing.T) {
+	w, dir := newEventKindTestWriter(t)
+
+	w.ObserveDLPVerdict(context.Background(), &capture.DLPVerdictRecord{
+		Subsurface:      testSubsurface,
+		Transport:       testTransport,
+		SessionID:       testSessionID,
+		RequestID:       ekTestRequestID,
+		ConfigHash:      testConfigHash,
+		ActionClass:     ekActionClassWrite,
+		Request:         capture.CaptureRequest{Method: http.MethodPost, URL: testURLVerdict},
+		TransformKind:   capture.TransformJoinedFields,
+		ScannerInput:    "field=value",
+		EffectiveAction: testEffAction,
+		Outcome:         capture.OutcomeClean,
+		// RedactionRewritesApplied intentionally zero.
+	})
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	_, summary := readCaptureSummary(t, dir)
+	if summary.RedactionRewritesApplied != 0 {
+		t.Fatalf("summary.RedactionRewritesApplied: got %d, want 0", summary.RedactionRewritesApplied)
+	}
+
+	entries := readSessionEntries(t, dir, testSessionID)
+	var foundCapture bool
+	for _, e := range entries {
+		if e.Type != capture.EntryTypeCapture {
+			continue
+		}
+		foundCapture = true
+		detailJSON, err := json.Marshal(e.Detail)
+		if err != nil {
+			t.Fatalf("Marshal Detail: %v", err)
+		}
+		if strings.Contains(string(detailJSON), "redaction_rewrites_applied") {
+			t.Fatalf("zero redaction_rewrites_applied should be omitted from JSON detail: %s", detailJSON)
+		}
+	}
+	if !foundCapture {
+		t.Fatal("no capture entry found")
 	}
 }
 

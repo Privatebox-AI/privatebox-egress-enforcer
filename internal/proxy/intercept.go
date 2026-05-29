@@ -752,20 +752,21 @@ func newInterceptHandler(
 					}
 				}
 				ic.Proxy.captureObs.ObserveDLPVerdict(r.Context(), &capture.DLPVerdictRecord{
-					Subsurface:        "dlp_body_intercept",
-					Transport:         "connect",
-					SessionID:         captureSessionKey(ic.Agent, ic.ClientIP),
-					SessionIDOriginal: captureSessionKeyOriginal(ic.Agent, ic.ClientIP),
-					RequestID:         ic.RequestID,
-					ConfigHash:        ic.Config.CanonicalPolicyHash(),
-					Agent:             ic.Agent,
-					Profile:           ic.Profile,
-					ActionClass:       captureHTTPActionClass(r.Method),
-					Request:           capture.CaptureRequest{Method: r.Method, URL: targetURL},
-					TransformKind:     capture.TransformJoinedFields,
-					RawFindings:       bodyScanToFindings(result),
-					EffectiveAction:   bodyAction,
-					Outcome:           captureOutcome(bodyAction, result.Clean),
+					Subsurface:               "dlp_body_intercept",
+					Transport:                "connect",
+					SessionID:                captureSessionKey(ic.Agent, ic.ClientIP),
+					SessionIDOriginal:        captureSessionKeyOriginal(ic.Agent, ic.ClientIP),
+					RequestID:                ic.RequestID,
+					ConfigHash:               ic.Config.CanonicalPolicyHash(),
+					Agent:                    ic.Agent,
+					Profile:                  ic.Profile,
+					ActionClass:              captureHTTPActionClass(r.Method),
+					Request:                  capture.CaptureRequest{Method: r.Method, URL: targetURL},
+					TransformKind:            capture.TransformJoinedFields,
+					RedactionRewritesApplied: redactionRewriteCount(result.RedactionReport),
+					RawFindings:              bodyScanToFindings(result),
+					EffectiveAction:          bodyAction,
+					Outcome:                  captureOutcome(bodyAction, result.Clean),
 				})
 			}
 			interceptRedactionReport = result.RedactionReport
@@ -1404,6 +1405,74 @@ func newInterceptHandler(
 					Agent:     ic.Agent,
 				}))
 			}
+			return
+		}
+
+		// Response-scan-exempt destinations stream through untouched. The
+		// operator has explicitly trusted this host, so its response body is
+		// forwarded without buffering: no media-policy metadata strip, no
+		// browser shield, no response-size block, and no injection scan
+		// (already skipped for exempt hosts). This keeps large or binary
+		// payloads such as signed file-transfer downloads byte-intact, and
+		// streaming avoids buffering an arbitrarily large trusted response in
+		// memory. Request-side DLP, redaction, SSRF, and authority checks
+		// already ran above. SSE is handled by the streaming branch above.
+		//
+		// Gated on the ic.Config.ResponseScanning.Enabled flag (not the
+		// scanner's ResponseScanningEnabled(), which is also true when only
+		// core response patterns are present) so exempt_domains stays dormant
+		// when the operator has turned response scanning off: with it off this
+		// falls through to the buffered path below, which still runs media
+		// policy. Preserves the "media policy runs even when response scanning
+		// is disabled" invariant and matches the exempt_domains validator warning.
+		if interceptRespExempt && ic.Config.ResponseScanning.Enabled {
+			ic.Logger.LogResponseScanExempt(actx, r.URL.Hostname())
+			ic.Metrics.RecordResponseScanExempt(ExemptReasonDomain, TransportConnect)
+			for k, vv := range resp.Header {
+				for _, v := range vv {
+					w.Header().Add(k, v)
+				}
+			}
+			removeHopByHopHeaders(w.Header())
+			w.WriteHeader(resp.StatusCode)
+			written, _ := io.Copy(w, resp.Body)
+			// Account streamed bytes against the per-domain data budget so a
+			// trusted download still decrements it (no scan-size cap: the host
+			// is trusted to carry large files).
+			ic.Scanner.RecordRequest(strings.ToLower(ic.TargetHost), int(written))
+			// Funnel through the same success bookkeeping as the scanned allow
+			// path: capture verdict (no scan ran, findings empty), clean-decay,
+			// and the allowed metric.
+			if ic.Proxy != nil {
+				ic.Proxy.captureObs.ObserveResponseVerdict(r.Context(), &capture.ResponseVerdictRecord{
+					Subsurface:        "response_intercept",
+					Transport:         "connect",
+					SessionID:         captureSessionKey(ic.Agent, ic.ClientIP),
+					SessionIDOriginal: captureSessionKeyOriginal(ic.Agent, ic.ClientIP),
+					RequestID:         ic.RequestID,
+					ConfigHash:        ic.Config.CanonicalPolicyHash(),
+					Agent:             ic.Agent,
+					Profile:           ic.Profile,
+					ActionClass:       captureHTTPActionClass(r.Method),
+					Request:           capture.CaptureRequest{Method: r.Method, URL: targetURL},
+					TransformKind:     capture.TransformRaw,
+					EffectiveAction:   config.ActionAllow,
+					Outcome:           captureOutcome(config.ActionAllow, true),
+				})
+			}
+			if ic.Recorder != nil && ic.Config.AdaptiveEnforcement.Enabled && !hasFinding {
+				ic.Recorder.RecordClean(ic.Config.AdaptiveEnforcement.DecayPerCleanRequest)
+			}
+			ic.Metrics.RecordAllowed(time.Since(reqStart), agentAnonymous)
+			interceptEmitReceipt(ic, withInterceptRedaction(receipt.EmitOpts{
+				ActionID:  actionID,
+				Verdict:   config.ActionAllow,
+				Transport: "intercept",
+				Method:    r.Method,
+				Target:    targetURL,
+				RequestID: ic.RequestID,
+				Agent:     ic.Agent,
+			}))
 			return
 		}
 

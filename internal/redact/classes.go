@@ -19,7 +19,37 @@ type classPattern struct {
 	// same substring matches multiple classes (e.g., a CIDR also contains an
 	// IPv4). Kept small integer to make ordering obvious.
 	priority int
+	// skipTrailing, when non-nil, rejects a match whose immediately-following
+	// text matches this anchored regex. Used to keep a class from flagging a
+	// value that is a protocol artifact rather than a leaked secret (e.g. an
+	// AWS access key ID inside a SigV4 pre-signed URL).
+	skipTrailing *regexp.Regexp
+	// skipLeading, when non-nil, additionally requires the text immediately
+	// BEFORE the match to match this regex (anchored at its end) for the skip
+	// to apply. Combined with skipTrailing it scopes the carve-out to a real
+	// X-Amz-Credential= context, so a SigV4-shaped substring sitting in
+	// arbitrary text is still redacted.
+	skipLeading *regexp.Regexp
 }
+
+// sigV4CredentialScope matches the credential-scope tail that follows an AWS
+// access key ID in a SigV4 pre-signed URL: AKIA<16> then
+// /YYYYMMDD/<region>/<service>/aws4_request, with either literal slashes or
+// URL-encoded %2F. The access key ID in a pre-signed URL is the public half of
+// the credential pair (the secret signing key is never transmitted; only a
+// derived signature is), so redacting it leaks no secret and corrupts the URL.
+// A bare access key ID, or one not in this scope shape, is still redacted.
+var sigV4CredentialScope = regexp.MustCompile(
+	`^(?:/|%2[Ff])[0-9]{8}(?:/|%2[Ff])[A-Za-z0-9-]{1,30}(?:/|%2[Ff])[A-Za-z0-9]{1,20}(?:/|%2[Ff])aws4_request\b`)
+
+// sigV4CredentialPrefix matches the X-Amz-Credential query-parameter key that
+// immediately precedes the access key ID in a SigV4 pre-signed URL. Anchored
+// at the end so it matches against the text just before the candidate. Both
+// the literal '=' and URL-encoded '%3D' separator are accepted. Requiring this
+// prefix (in addition to the credential-scope suffix) keeps the carve-out
+// scoped to a real X-Amz-Credential value, so a SigV4-shaped substring that
+// merely appears in arbitrary text is still redacted.
+var sigV4CredentialPrefix = regexp.MustCompile(`(?i)x-amz-credential(?:=|%3d)$`)
 
 // Shared regex fragments reused across category-specific registries.
 const (
@@ -54,7 +84,7 @@ func tokenClasses() []classPattern {
 		// KEY=<placeholder> does not remain shaped like an env-secret leak
 		// after redaction.
 		{class: ClassEnvSecret, pattern: regexp.MustCompile(`\b` + envSecretName + `\b\s*=\s*\S{8,}`), priority: 120},
-		{class: ClassAWSAccessKey, pattern: regexp.MustCompile(`\b(?:AKIA|ASIA|AIDA|AGPA|AROA)[A-Z0-9]{16}\b`), priority: 100},
+		{class: ClassAWSAccessKey, pattern: regexp.MustCompile(`\b(?:AKIA|ASIA|AIDA|AGPA|AROA)[A-Z0-9]{16}\b`), priority: 100, skipTrailing: sigV4CredentialScope, skipLeading: sigV4CredentialPrefix},
 		{class: ClassAWSSecretKey, pattern: regexp.MustCompile(`(?i)\b(?:aws_secret_access_key|secret.?access.?key|SecretAccessKey)\s*["'=:\s]{1,5}\s*[A-Za-z0-9/+=]{40}\b`), priority: 100},
 		{class: ClassGoogleAPIKey, pattern: regexp.MustCompile(`\bAIza[0-9A-Za-z_-]{35}\b`), priority: 100},
 		{class: ClassGitHubToken, pattern: regexp.MustCompile(`\b(?:ghp|gho|ghu|ghs|ghr|github_pat)_[A-Za-z0-9_]{20,}\b`), priority: 100},
@@ -91,12 +121,28 @@ func tokenClasses() []classPattern {
 // win over shorter-hash prefixes, hence the descending priorities. NTLM
 // and MD5 share hex32; disambiguation needs context we don't have at
 // regex time, so we expose MD5 and leave NTLM as a reserved label.
+//
+// Each pattern REQUIRES a contextual keyword prefix (sha256, sha-256,
+// hash-sha256, md5, etc.) followed by a separator (whitespace, colon, or
+// equals) before the hex digest. The earlier unprefixed form was an
+// excessive false-positive source: any 64-char hex string matched the
+// SHA-256 class, including legitimate OAuth client_secret values that
+// happened to be 64 hex chars (various SaaS providers, GitLab) and opaque session
+// tokens of the same shape. The PR #635 allowlist_unparseable contract
+// fix surfaced this: redaction kept mangling a SaaS OAuth client_secret in
+// form-urlencoded OAuth bodies even after the host was on the trust
+// list, because the bare-hex matcher was rewriting the secret value to
+// a placeholder before the upstream saw it. Tightening the matcher to
+// require a self-labeled prefix preserves the DLP signal on values that
+// present as hashes (integrity attestations, debug logs that name the
+// digest scheme, manifest entries) while letting opaque hex blobs
+// through.
 func hashClasses() []classPattern {
 	return []classPattern{
-		{class: ClassHashSHA512, pattern: regexp.MustCompile(`\b` + hex128 + `\b`), priority: 90},
-		{class: ClassHashSHA256, pattern: regexp.MustCompile(`\b` + hex64 + `\b`), priority: 85},
-		{class: ClassHashSHA1, pattern: regexp.MustCompile(`\b` + hex40 + `\b`), priority: 80},
-		{class: ClassHashMD5, pattern: regexp.MustCompile(`\b` + hex32 + `\b`), priority: 75},
+		{class: ClassHashSHA512, pattern: regexp.MustCompile(`(?i)\b(?:sha[-_]?512|hash[-_]?sha[-_]?512)[\s:=]+` + hex128 + `\b`), priority: 90},
+		{class: ClassHashSHA256, pattern: regexp.MustCompile(`(?i)\b(?:sha[-_]?256|hash[-_]?sha[-_]?256)[\s:=]+` + hex64 + `\b`), priority: 85},
+		{class: ClassHashSHA1, pattern: regexp.MustCompile(`(?i)\b(?:sha[-_]?1|hash[-_]?sha[-_]?1)[\s:=]+` + hex40 + `\b`), priority: 80},
+		{class: ClassHashMD5, pattern: regexp.MustCompile(`(?i)\b(?:md5|hash[-_]?md5)[\s:=]+` + hex32 + `\b`), priority: 75},
 	}
 }
 

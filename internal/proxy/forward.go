@@ -1103,20 +1103,21 @@ func (p *Proxy) handleForwardHTTP(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			p.captureObs.ObserveDLPVerdict(r.Context(), &capture.DLPVerdictRecord{
-				Subsurface:        "dlp_body_forward",
-				Transport:         "forward",
-				SessionID:         captureSessionKey(agent, clientIP),
-				SessionIDOriginal: captureSessionKeyOriginal(agent, clientIP),
-				RequestID:         requestID,
-				ConfigHash:        cfg.CanonicalPolicyHash(),
-				Agent:             agent,
-				Profile:           id.Profile,
-				ActionClass:       captureHTTPActionClass(r.Method),
-				Request:           capture.CaptureRequest{Method: r.Method, URL: targetURL},
-				TransformKind:     capture.TransformJoinedFields,
-				RawFindings:       bodyScanToFindings(bodyResult),
-				EffectiveAction:   bodyAction,
-				Outcome:           captureOutcome(bodyAction, bodyResult.Clean),
+				Subsurface:               "dlp_body_forward",
+				Transport:                "forward",
+				SessionID:                captureSessionKey(agent, clientIP),
+				SessionIDOriginal:        captureSessionKeyOriginal(agent, clientIP),
+				RequestID:                requestID,
+				ConfigHash:               cfg.CanonicalPolicyHash(),
+				Agent:                    agent,
+				Profile:                  id.Profile,
+				ActionClass:              captureHTTPActionClass(r.Method),
+				Request:                  capture.CaptureRequest{Method: r.Method, URL: targetURL},
+				TransformKind:            capture.TransformJoinedFields,
+				RedactionRewritesApplied: redactionRewriteCount(bodyResult.RedactionReport),
+				RawFindings:              bodyScanToFindings(bodyResult),
+				EffectiveAction:          bodyAction,
+				Outcome:                  captureOutcome(bodyAction, bodyResult.Clean),
 			})
 		}
 		forwardRedactionReport = bodyResult.RedactionReport
@@ -1805,6 +1806,77 @@ func (p *Proxy) handleForwardHTTP(w http.ResponseWriter, r *http.Request) {
 			if forwardRec != nil && cfg.AdaptiveEnforcement.Enabled && !hasFinding {
 				forwardRec.RecordClean(cfg.AdaptiveEnforcement.DecayPerCleanRequest)
 			}
+		}
+		return
+	}
+
+	// Response-scan-exempt destinations stream through untouched (parity with
+	// the TLS-interception path): the operator trusts this host, so no
+	// media-policy metadata strip, no browser shield, no response-size block,
+	// and no injection scan. This keeps large or binary file-transfer
+	// downloads byte-intact and avoids buffering an arbitrarily large trusted
+	// response in memory. Request-side scanning already ran. Reaching here
+	// means the response is not SSE (the streaming branch above returned).
+	//
+	// Gated on the cfg.ResponseScanning.Enabled flag (not the scanner's
+	// ResponseScanningEnabled(), which is also true when only core response
+	// patterns are present) so exempt_domains stays dormant when the operator
+	// has turned response scanning off: with it off the request falls through
+	// to the buffered path below, which still runs media policy and browser
+	// shield. This preserves the "media policy runs even when response scanning
+	// is disabled" invariant and matches the validator warning that
+	// exempt_domains only takes effect when response scanning is enabled.
+	if fwdRespExempt && cfg.ResponseScanning.Enabled {
+		copyResponseHeaders(w.Header(), resp.Header)
+		w.WriteHeader(resp.StatusCode)
+		written, _ := io.Copy(w, resp.Body)
+		// Account streamed bytes against both budgets so a trusted download
+		// still decrements the per-domain data budget and the per-agent byte
+		// budget. No scan-size cap is applied (the host is trusted to carry
+		// large files), but cumulative budget enforcement still blocks future
+		// requests once the budget is exhausted.
+		sc.RecordRequest(strings.ToLower(r.URL.Hostname()), int(written))
+		_ = resolved.Budget.RecordBytes(written)
+		duration := time.Since(start)
+		p.metrics.RecordAllowed(duration, agentLabel)
+		// Record the allow verdict on the capture surface so exempt downloads
+		// stay visible to policy replay. No scan ran, so findings are empty.
+		p.captureObs.ObserveResponseVerdict(r.Context(), &capture.ResponseVerdictRecord{
+			Subsurface:        "response_forward",
+			Transport:         "forward",
+			SessionID:         captureSessionKey(agent, clientIP),
+			SessionIDOriginal: captureSessionKeyOriginal(agent, clientIP),
+			RequestID:         requestID,
+			ConfigHash:        cfg.CanonicalPolicyHash(),
+			Agent:             agent,
+			Profile:           id.Profile,
+			ActionClass:       captureHTTPActionClass(r.Method),
+			Request:           capture.CaptureRequest{Method: r.Method, URL: targetURL},
+			TransformKind:     capture.TransformRaw,
+			EffectiveAction:   config.ActionAllow,
+			Outcome:           captureOutcome(config.ActionAllow, true),
+		})
+		p.emitReceipt(withForwardRedaction(receipt.EmitOpts{
+			ActionID:            actionID,
+			Verdict:             config.ActionAllow,
+			Transport:           "forward",
+			Method:              r.Method,
+			Target:              targetURL,
+			RequestID:           requestID,
+			Agent:               agent,
+			SessionTaintLevel:   forwardTaint.Risk.Level.String(),
+			SessionContaminated: forwardTaint.Risk.Contaminated,
+			RecentTaintSources:  forwardTaint.Risk.Sources,
+			SessionTaskID:       forwardTaint.Task.CurrentTaskID,
+			SessionTaskLabel:    forwardTaint.Task.CurrentTaskLabel,
+			AuthorityKind:       forwardTaint.Authority.String(),
+			TaintDecision:       forwardTaint.Result.Decision.String(),
+			TaintDecisionReason: forwardTaint.Result.Reason,
+			TaskOverrideApplied: forwardTaint.TaskOverrideApplied,
+		}))
+		p.logger.LogForwardHTTP(actx, resp.StatusCode, int(written), duration)
+		if forwardRec != nil && cfg.AdaptiveEnforcement.Enabled && !hasFinding {
+			forwardRec.RecordClean(cfg.AdaptiveEnforcement.DecayPerCleanRequest)
 		}
 		return
 	}
