@@ -1,7 +1,7 @@
 // Copyright 2026 Josh Waldrep
 // SPDX-License-Identifier: Apache-2.0
 
-// Package receipt defines the EvidenceReceipt v2 envelope, the 13 typed payload
+// Package receipt defines the EvidenceReceipt v2 envelope, the typed payload
 // structs, and the payload-kind → validator dispatch registry.
 //
 // The EvidenceReceipt envelope is the v2 replacement for the legacy ActionReceipt
@@ -44,7 +44,9 @@ const (
 type PayloadKind string
 
 const (
-	PayloadProxyDecision              PayloadKind = "proxy_decision"
+	PayloadProxyDecision          PayloadKind = "proxy_decision"
+	PayloadProxyDecisionWithSpans PayloadKind = "proxy_decision_with_spans"
+
 	PayloadContractRatified           PayloadKind = "contract_ratified"
 	PayloadContractPromoteIntent      PayloadKind = "contract_promote_intent"
 	PayloadContractPromoteCommitted   PayloadKind = "contract_promote_committed"
@@ -214,7 +216,7 @@ func VerifyWithKey(r EvidenceReceipt, pubKey ed25519.PublicKey, expectedSignerKe
 		return err
 	}
 	if !ed25519.Verify(pubKey, preimage, sig) {
-		return fmt.Errorf("%w: signature verification failed", ErrPayloadInvalidEnum)
+		return ErrSignatureVerification
 	}
 	return nil
 }

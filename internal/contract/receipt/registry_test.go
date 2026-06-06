@@ -14,6 +14,7 @@ import (
 // allPayloadKinds enumerates every declared PayloadKind constant.
 var allPayloadKinds = []receipt.PayloadKind{
 	receipt.PayloadProxyDecision,
+	receipt.PayloadProxyDecisionWithSpans,
 	receipt.PayloadContractRatified,
 	receipt.PayloadContractPromoteIntent,
 	receipt.PayloadContractPromoteCommitted,
@@ -28,9 +29,9 @@ var allPayloadKinds = []receipt.PayloadKind{
 	receipt.PayloadContractRedactionRequest,
 }
 
-func TestRegistry_HasAll13PayloadKinds(t *testing.T) {
-	if len(allPayloadKinds) != 13 {
-		t.Fatalf("expected 13 payload kinds in test table, got %d", len(allPayloadKinds))
+func TestRegistry_HasAll14PayloadKinds(t *testing.T) {
+	if len(allPayloadKinds) != 14 {
+		t.Fatalf("expected 14 payload kinds in test table, got %d", len(allPayloadKinds))
 	}
 	for _, kind := range allPayloadKinds {
 		kind := kind
