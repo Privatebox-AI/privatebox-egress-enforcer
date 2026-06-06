@@ -224,6 +224,108 @@ func TestSourceSpanMatchHash_RejectsEmptyMatchValue(t *testing.T) {
 	}
 }
 
+func TestValidateSourceSpan_RejectsMalformedFields(t *testing.T) {
+	t.Parallel()
+	negativeOffset := -1
+	zeroLength := 0
+	offset := 20
+	length := len(testRedactedValue)
+	tests := map[string]struct {
+		mutate func(*receipt.SourceSpan)
+		want   error
+	}{
+		"missing source id": {
+			mutate: func(span *receipt.SourceSpan) { span.SourceID = "" },
+			want:   receipt.ErrPayloadMissingField,
+		},
+		"invalid normalized view": {
+			mutate: func(span *receipt.SourceSpan) { span.NormalizedView = "unknown_view" },
+			want:   receipt.ErrPayloadInvalidEnum,
+		},
+		"bad binary digest prefix": {
+			mutate: func(span *receipt.SourceSpan) { span.PipelockBinaryDigest = "md5:0123" },
+			want:   receipt.ErrPayloadInvalidEnum,
+		},
+		"bad rules digest length": {
+			mutate: func(span *receipt.SourceSpan) { span.RulesBundleDigest = "sha256:0123" },
+			want:   receipt.ErrPayloadInvalidEnum,
+		},
+		"bad policy digest hex": {
+			mutate: func(span *receipt.SourceSpan) {
+				span.PolicyHash = "sha256:" + strings.Repeat("z", 64)
+			},
+			want: receipt.ErrPayloadInvalidEnum,
+		},
+		"wrong hash alg": {
+			mutate: func(span *receipt.SourceSpan) { span.MatchHashAlg = "sha256" },
+			want:   receipt.ErrPayloadInvalidEnum,
+		},
+		"short match hash": {
+			mutate: func(span *receipt.SourceSpan) { span.MatchHash = "hmac-sha256:0123" },
+			want:   receipt.ErrPayloadInvalidEnum,
+		},
+		"bad match hash hex": {
+			mutate: func(span *receipt.SourceSpan) {
+				span.MatchHash = "hmac-sha256:" + strings.Repeat("z", 64)
+			},
+			want: receipt.ErrPayloadInvalidEnum,
+		},
+		"missing offset": {
+			mutate: func(span *receipt.SourceSpan) {
+				span.CharOffset = nil
+				span.CharLength = &length
+			},
+			want: receipt.ErrPayloadMissingField,
+		},
+		"missing length": {
+			mutate: func(span *receipt.SourceSpan) {
+				span.CharOffset = &offset
+				span.CharLength = nil
+			},
+			want: receipt.ErrPayloadMissingField,
+		},
+		"negative offset": {
+			mutate: func(span *receipt.SourceSpan) { span.CharOffset = &negativeOffset },
+			want:   receipt.ErrPayloadInvalidEnum,
+		},
+		"zero length": {
+			mutate: func(span *receipt.SourceSpan) { span.CharLength = &zeroLength },
+			want:   receipt.ErrPayloadInvalidEnum,
+		},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			span := validSourceSpan(t)
+			tc.mutate(&span)
+			if err := receipt.ValidateSourceSpan(span); !errors.Is(err, tc.want) {
+				t.Fatalf("ValidateSourceSpan err = %v, want %v", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestValidateSourceSpan_AcceptsDLPNormalizedPrefixView(t *testing.T) {
+	t.Parallel()
+	span := validSourceSpan(t)
+	span.NormalizedView = "dlp_normalized:aws_access_key"
+	if err := receipt.ValidateSourceSpan(span); err != nil {
+		t.Fatalf("ValidateSourceSpan rejected dlp-normalized prefix view: %v", err)
+	}
+}
+
+func TestSourceSpanMatchHash_RejectsMissingContext(t *testing.T) {
+	t.Parallel()
+	_, err := receipt.SourceSpanMatchHash([]byte(testSpanMACKey), "", 0, validSourceSpan(t), testRedactedValue)
+	if !errors.Is(err, receipt.ErrPayloadMissingField) {
+		t.Fatalf("empty event_id err = %v, want ErrPayloadMissingField", err)
+	}
+	_, err = receipt.SourceSpanMatchHash([]byte(testSpanMACKey), testSpanEventID, -1, validSourceSpan(t), testRedactedValue)
+	if !errors.Is(err, receipt.ErrPayloadInvalidEnum) {
+		t.Fatalf("negative span_index err = %v, want ErrPayloadInvalidEnum", err)
+	}
+}
+
 func TestProxyDecisionWithSpansPayload_CarriesRedactedSampleOnlyInFixture(t *testing.T) {
 	t.Parallel()
 	// TODO(emitter): add the production no-leak regression when the live
