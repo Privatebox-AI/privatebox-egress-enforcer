@@ -60,6 +60,7 @@ func scanHTTPInputDecision(msg []byte, logW io.Writer, sessionKey, auditSessionK
 	obs := opts.captureObserver()
 	redactionCfg := opts.redactionConfig()
 	receiptEmitter := opts.receiptEmitter()
+	v2ReceiptEmitter := opts.v2ReceiptEmitter()
 	envelopeEmitter := opts.envelopeEmitter()
 	redirectRT := opts.redirectRT()
 	result := httpInputDecision{ForwardMessage: msg}
@@ -79,6 +80,9 @@ func scanHTTPInputDecision(msg []byte, logW io.Writer, sessionKey, auditSessionK
 	defer func() {
 		receiptOpts := mcpToolReceiptOpts{
 			Emitter:          receiptEmitter,
+			V2Emitter:        v2ReceiptEmitter,
+			PolicyHash:       opts.receiptPolicyHash(),
+			Log:              logW,
 			Transport:        opts.Transport,
 			RedactionProfile: redactionCfg.Profile,
 			ActionID:         actionID,
@@ -167,7 +171,7 @@ func scanHTTPInputDecision(msg []byte, logW io.Writer, sessionKey, auditSessionK
 		actionID = receipt.NewActionID()
 	}
 	if scanEnabled && redactionCfg.Matcher != nil {
-		originalVerdict := ScanRequest(inputScanCtx, msg, sc, action, onParseError)
+		originalVerdict := scanRequestForAgent(inputScanCtx, msg, sc, action, onParseError, opts.addressProtectionAgent())
 		if !originalVerdict.Clean && inputVerdictEffectiveAction(originalVerdict, action) == config.ActionBlock {
 			receiptLayer, receiptPattern, receiptSeverity = contentScanAttribution(originalVerdict)
 			_, _ = fmt.Fprintf(logW, "pipelock: input: blocked (%s)\n", joinInputVerdictReasons(originalVerdict))

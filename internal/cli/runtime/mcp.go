@@ -27,6 +27,7 @@ import (
 	"github.com/luckyPipewrench/pipelock/internal/capture"
 	"github.com/luckyPipewrench/pipelock/internal/cliutil"
 	"github.com/luckyPipewrench/pipelock/internal/config"
+	"github.com/luckyPipewrench/pipelock/internal/contract/proxydecision"
 	"github.com/luckyPipewrench/pipelock/internal/edition"
 	"github.com/luckyPipewrench/pipelock/internal/envelope"
 	"github.com/luckyPipewrench/pipelock/internal/filesentry"
@@ -214,6 +215,18 @@ func handleProxyError(err error, logW io.Writer, sentryClient *plsentry.Client) 
 		sentryClient.CaptureError(err)
 	}
 	return err
+}
+
+func mcpReceiptParityOpts(
+	opts mcp.MCPProxyOpts,
+	receiptEmitter *receipt.Emitter,
+	v2ReceiptEmitter *proxydecision.Emitter,
+	policyHash string,
+) mcp.MCPProxyOpts {
+	opts.ReceiptEmitter = receiptEmitter
+	opts.V2ReceiptEmitter = v2ReceiptEmitter
+	opts.PolicyHash = policyHash
+	return opts
 }
 
 // ErrInjectionDetected is returned when pipelock mcp scan detects prompt injection.
@@ -673,6 +686,7 @@ Key-free evidence capture:
 			}
 
 			var receiptEmitter *receipt.Emitter
+			var v2ReceiptEmitter *proxydecision.Emitter
 			if cfg.FlightRecorder.Enabled {
 				recCfg := recorder.Config{
 					Enabled:            cfg.FlightRecorder.Enabled,
@@ -733,6 +747,16 @@ Key-free evidence capture:
 				// never execute.
 				if len(recPrivKey) > 0 {
 					cmd.PrintErrf("  Receipts: enabled (action receipts signed)\n")
+					v2ReceiptEmitter = proxydecision.NewEmitter(proxydecision.EmitterConfig{
+						Recorder:  rec,
+						Signer:    proxydecision.NewKeyedSigner(recPrivKey),
+						Sanitize:  proxydecision.SanitizeFromRedactor(rec.ReceiptRedactor()),
+						Principal: "local",
+						Actor:     "pipelock",
+					})
+					if v2ReceiptEmitter != nil {
+						cmd.PrintErrf("  Receipts: v2 proxy_decision dual-emit enabled\n")
+					}
 				} else {
 					cmd.PrintErrf("  Receipts: disabled — set flight_recorder.signing_key_path to enable signed action receipts\n")
 				}
@@ -849,27 +873,28 @@ Key-free evidence capture:
 					adaptiveFn := mcp.AdaptiveConfigFunc(func() *config.AdaptiveEnforcement {
 						return adaptiveCfg
 					})
-					if err := mcp.RunHTTPListenerProxy(ctx, mcpLn, upstreamURL, cmd.ErrOrStderr(), mcp.MCPProxyOpts{
+					listenerOpts := mcpReceiptParityOpts(mcp.MCPProxyOpts{
 						Scanner: sc, Approver: approver,
 						InputCfg: inputCfg, RequestBodyCfg: &cfg.RequestBodyScanning,
 						ToolCfg: toolCfg, PolicyCfg: policyCfg,
 						KillSwitch: ks, ChainMatcher: chainMatcher,
 						CEE: cee, Store: store, AdaptiveCfgFn: adaptiveFn, Metrics: mcpMetrics,
 						ConfigHash: captureConfigHash, Profile: captureProfile,
-						RedirectRT:      buildRedirectRT(cfg),
-						ProvenanceCfg:   &cfg.MCPToolProvenance,
-						EnvelopeEmitter: envEmitter,
-						DoWCheck:        dowCheck,
-						ReceiptEmitter:  receiptEmitter,
-						CaptureObs:      captureObs,
-						MediaPolicy:     &cfg.MediaPolicy,
-						RedactMatcher:   mcpRedactMatcher,
-						RedactLimits:    cfg.Redaction.Limits.ToLimits(),
-						RedactProfile:   cfg.Redaction.DefaultProfile,
-						TaintCfg:        &cfg.Taint,
-						ContractLoader:  contractLoader,
-						ContractAgent:   contractAgent,
-					}); err != nil {
+						AddressProtectionAgent: captureProfile,
+						RedirectRT:             buildRedirectRT(cfg),
+						ProvenanceCfg:          &cfg.MCPToolProvenance,
+						EnvelopeEmitter:        envEmitter,
+						DoWCheck:               dowCheck,
+						CaptureObs:             captureObs,
+						MediaPolicy:            &cfg.MediaPolicy,
+						RedactMatcher:          mcpRedactMatcher,
+						RedactLimits:           cfg.Redaction.Limits.ToLimits(),
+						RedactProfile:          cfg.Redaction.DefaultProfile,
+						TaintCfg:               &cfg.Taint,
+						ContractLoader:         contractLoader,
+						ContractAgent:          contractAgent,
+					}, receiptEmitter, v2ReceiptEmitter, captureConfigHash)
+					if err := mcp.RunHTTPListenerProxy(ctx, mcpLn, upstreamURL, cmd.ErrOrStderr(), listenerOpts); err != nil {
 						if sentryClient != nil {
 							sentryClient.CaptureError(err)
 						}
@@ -882,28 +907,28 @@ Key-free evidence capture:
 				if isWSUpstream {
 					_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "pipelock: proxying WS upstream %s (response=%s, input=%s, tools=%s, policy=%s)\n",
 						upstreamURL, sc.ResponseAction(), inputCfg.Action, toolAction, policyAction)
-					wsOpts := mcp.MCPProxyOpts{
+					wsOpts := mcpReceiptParityOpts(mcp.MCPProxyOpts{
 						Scanner: sc, Approver: approver,
 						InputCfg: inputCfg, ToolCfg: toolCfg, PolicyCfg: policyCfg,
 						KillSwitch: ks, ChainMatcher: chainMatcher,
 						CEE: cee, Store: store,
-						AdaptiveCfg:     adaptiveCfg,
-						ConfigHash:      captureConfigHash,
-						Profile:         captureProfile,
-						Metrics:         mcpMetrics,
-						ReceiptEmitter:  receiptEmitter,
-						CaptureObs:      captureObs,
-						RedirectRT:      buildRedirectRT(cfg),
-						DoWCheck:        dowCheck,
-						EnvelopeEmitter: envEmitter,
-						MediaPolicy:     &cfg.MediaPolicy,
-						RedactMatcher:   mcpRedactMatcher,
-						RedactLimits:    cfg.Redaction.Limits.ToLimits(),
-						RedactProfile:   cfg.Redaction.DefaultProfile,
-						TaintCfg:        &cfg.Taint,
-						ContractLoader:  contractLoader,
-						ContractAgent:   contractAgent,
-					}
+						AdaptiveCfg:            adaptiveCfg,
+						ConfigHash:             captureConfigHash,
+						Profile:                captureProfile,
+						AddressProtectionAgent: captureProfile,
+						Metrics:                mcpMetrics,
+						CaptureObs:             captureObs,
+						RedirectRT:             buildRedirectRT(cfg),
+						DoWCheck:               dowCheck,
+						EnvelopeEmitter:        envEmitter,
+						MediaPolicy:            &cfg.MediaPolicy,
+						RedactMatcher:          mcpRedactMatcher,
+						RedactLimits:           cfg.Redaction.Limits.ToLimits(),
+						RedactProfile:          cfg.Redaction.DefaultProfile,
+						TaintCfg:               &cfg.Taint,
+						ContractLoader:         contractLoader,
+						ContractAgent:          contractAgent,
+					}, receiptEmitter, v2ReceiptEmitter, captureConfigHash)
 					if err := mcp.RunWSProxy(ctx, cmd.InOrStdin(), cmd.OutOrStdout(), cmd.ErrOrStderr(), upstreamURL, wsOpts); err != nil {
 						if sentryClient != nil {
 							sentryClient.CaptureError(err)
@@ -916,28 +941,28 @@ Key-free evidence capture:
 				// Stdio-to-HTTP mode: --upstream only.
 				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "pipelock: proxying upstream %s (response=%s, input=%s, tools=%s, policy=%s)\n",
 					upstreamURL, sc.ResponseAction(), inputCfg.Action, toolAction, policyAction)
-				httpOpts := mcp.MCPProxyOpts{
+				httpOpts := mcpReceiptParityOpts(mcp.MCPProxyOpts{
 					Scanner: sc, Approver: approver,
 					InputCfg: inputCfg, ToolCfg: toolCfg, PolicyCfg: policyCfg,
 					KillSwitch: ks, ChainMatcher: chainMatcher,
 					CEE: cee, Store: store,
 					AdaptiveCfg: adaptiveCfg, Metrics: mcpMetrics,
 					ConfigHash: captureConfigHash, Profile: captureProfile,
-					RedirectRT:      buildRedirectRT(cfg),
-					EnvelopeEmitter: envEmitter,
-					DoWCheck:        dowCheck,
-					ReceiptEmitter:  receiptEmitter,
-					CaptureObs:      captureObs,
-					IntegrityCfg:    &cfg.MCPBinaryIntegrity,
-					ProvenanceCfg:   &cfg.MCPToolProvenance,
-					MediaPolicy:     &cfg.MediaPolicy,
-					RedactMatcher:   mcpRedactMatcher,
-					RedactLimits:    cfg.Redaction.Limits.ToLimits(),
-					RedactProfile:   cfg.Redaction.DefaultProfile,
-					TaintCfg:        &cfg.Taint,
-					ContractLoader:  contractLoader,
-					ContractAgent:   contractAgent,
-				}
+					AddressProtectionAgent: captureProfile,
+					RedirectRT:             buildRedirectRT(cfg),
+					EnvelopeEmitter:        envEmitter,
+					DoWCheck:               dowCheck,
+					CaptureObs:             captureObs,
+					IntegrityCfg:           &cfg.MCPBinaryIntegrity,
+					ProvenanceCfg:          &cfg.MCPToolProvenance,
+					MediaPolicy:            &cfg.MediaPolicy,
+					RedactMatcher:          mcpRedactMatcher,
+					RedactLimits:           cfg.Redaction.Limits.ToLimits(),
+					RedactProfile:          cfg.Redaction.DefaultProfile,
+					TaintCfg:               &cfg.Taint,
+					ContractLoader:         contractLoader,
+					ContractAgent:          contractAgent,
+				}, receiptEmitter, v2ReceiptEmitter, captureConfigHash)
 				if err := mcp.RunHTTPProxy(ctx, cmd.InOrStdin(), cmd.OutOrStdout(), cmd.ErrOrStderr(), upstreamURL, extraHeaders, httpOpts); err != nil {
 					if sentryClient != nil {
 						sentryClient.CaptureError(err)
@@ -1051,10 +1076,20 @@ Key-free evidence capture:
 					}
 				}
 
-				closeBridge, bridgeErr := setupMCPSandboxBridge(
-					ctx, runtime.GOOS, cfg, ks, auditLogger, mcpMetrics, receiptEmitter, envEmitter,
-					cmd.ErrOrStderr(), &launchCfg, startMCPSandboxBridge,
-				)
+				closeBridge, bridgeErr := setupMCPSandboxBridge(mcpSandboxBridgeSetupOptions{
+					Context:          ctx,
+					GOOS:             runtime.GOOS,
+					Config:           cfg,
+					KillSwitch:       ks,
+					AuditLogger:      auditLogger,
+					Metrics:          mcpMetrics,
+					ReceiptEmitter:   receiptEmitter,
+					V2ReceiptEmitter: v2ReceiptEmitter,
+					EnvelopeEmitter:  envEmitter,
+					Stderr:           cmd.ErrOrStderr(),
+					LaunchConfig:     &launchCfg,
+					StartBridge:      startMCPSandboxBridge,
+				})
 				if bridgeErr != nil {
 					return bridgeErr
 				}
@@ -1066,16 +1101,16 @@ Key-free evidence capture:
 				}
 				sandboxCmd.Stderr = cmd.ErrOrStderr()
 
-				proxyOpts := mcp.MCPProxyOpts{
+				proxyOpts := mcpReceiptParityOpts(mcp.MCPProxyOpts{
 					Scanner: sc, Approver: approver,
 					InputCfg: inputCfg, ToolCfg: toolCfg, PolicyCfg: policyCfg,
 					KillSwitch: ks, ChainMatcher: chainMatcher,
 					CEE: cee, Store: store,
 					AdaptiveCfg: adaptiveCfg, Metrics: mcpMetrics,
 					ConfigHash: captureConfigHash, Profile: captureProfile,
-					RedirectRT: buildRedirectRT(cfg), DoWCheck: dowCheck,
+					AddressProtectionAgent: captureProfile,
+					RedirectRT:             buildRedirectRT(cfg), DoWCheck: dowCheck,
 					EnvelopeEmitter: envEmitter,
-					ReceiptEmitter:  receiptEmitter,
 					CaptureObs:      captureObs,
 					IntegrityCfg:    &cfg.MCPBinaryIntegrity,
 					ProvenanceCfg:   &cfg.MCPToolProvenance,
@@ -1086,7 +1121,7 @@ Key-free evidence capture:
 					TaintCfg:        &cfg.Taint,
 					ContractLoader:  contractLoader,
 					ContractAgent:   contractAgent,
-				}
+				}, receiptEmitter, v2ReceiptEmitter, captureConfigHash)
 				if err := mcp.RunProxyWithSandbox(ctx, sandboxCmd, cmd.InOrStdin(), cmd.OutOrStdout(), cmd.ErrOrStderr(), proxyOpts, mcpStrict); err != nil {
 					return handleProxyError(err, cmd.ErrOrStderr(), sentryClient)
 				}
@@ -1176,16 +1211,16 @@ Key-free evidence capture:
 				} // watcher != nil
 			}
 
-			proxyOpts := mcp.MCPProxyOpts{
+			proxyOpts := mcpReceiptParityOpts(mcp.MCPProxyOpts{
 				Scanner: sc, Approver: approver,
 				InputCfg: inputCfg, ToolCfg: toolCfg, PolicyCfg: policyCfg,
 				KillSwitch: ks, ChainMatcher: chainMatcher,
 				CEE: cee, Store: store,
 				AdaptiveCfg: adaptiveCfg, Metrics: mcpMetrics,
 				ConfigHash: captureConfigHash, Profile: captureProfile,
-				RedirectRT: buildRedirectRT(cfg), DoWCheck: dowCheck,
+				AddressProtectionAgent: captureProfile,
+				RedirectRT:             buildRedirectRT(cfg), DoWCheck: dowCheck,
 				EnvelopeEmitter: envEmitter,
-				ReceiptEmitter:  receiptEmitter,
 				CaptureObs:      captureObs,
 				IntegrityCfg:    &cfg.MCPBinaryIntegrity,
 				ProvenanceCfg:   &cfg.MCPToolProvenance,
@@ -1197,7 +1232,7 @@ Key-free evidence capture:
 				Lineage:         lin, OnChildReady: onChildReady,
 				ContractLoader: contractLoader,
 				ContractAgent:  contractAgent,
-			}
+			}, receiptEmitter, v2ReceiptEmitter, captureConfigHash)
 			if err := mcp.RunProxy(ctx, cmd.InOrStdin(), cmd.OutOrStdout(), logW, serverCmd, proxyOpts, extraEnv...); err != nil {
 				return handleProxyError(err, logW, sentryClient)
 			}

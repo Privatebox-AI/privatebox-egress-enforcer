@@ -6,6 +6,7 @@ package mcp
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,6 +21,7 @@ import (
 	"testing"
 
 	"github.com/luckyPipewrench/pipelock/internal/config"
+	contractreceipt "github.com/luckyPipewrench/pipelock/internal/contract/receipt"
 	"github.com/luckyPipewrench/pipelock/internal/hitl"
 	"github.com/luckyPipewrench/pipelock/internal/killswitch"
 	"github.com/luckyPipewrench/pipelock/internal/mcp/integrity"
@@ -330,6 +332,81 @@ func TestForwardScanned_BlockAction_EmitsReceipt(t *testing.T) {
 
 	if !foundReceipt {
 		t.Fatal("expected an action_receipt entry")
+	}
+}
+
+func TestForwardScanned_BlockAction_DualEmitsV2PolicyHash(t *testing.T) {
+	sc := testScannerWithAction(t, config.ActionBlock)
+	var out, log bytes.Buffer
+	h := newMCPDecisionReceiptHarness(t)
+
+	tracker := NewRequestTracker()
+	tracker.Track(json.RawMessage(`42`))
+
+	found, err := ForwardScanned(
+		transport.NewStdioReader(strings.NewReader(injectionResponse+"\n")),
+		transport.NewStdioWriter(&out),
+		&log,
+		tracker,
+		MCPProxyOpts{
+			Scanner:          sc,
+			ReceiptEmitter:   h.v1,
+			V2ReceiptEmitter: h.v2,
+			PolicyHash:       mcpTestPolicyHash,
+			Transport:        transportMCPStdio,
+		},
+	)
+	if err != nil {
+		t.Fatalf("ForwardScanned: %v", err)
+	}
+	if !found {
+		t.Fatal("expected injection detected")
+	}
+
+	v1s := decisionReceiptLogFor(t, h.dir)
+	if len(v1s) != 1 {
+		t.Fatalf("got %d v1 receipts, want 1", len(v1s))
+	}
+	if err := receipt.VerifyWithKey(v1s[0], hex.EncodeToString(h.pub)); err != nil {
+		t.Fatalf("v1 receipt verify: %v", err)
+	}
+	ar := v1s[0].ActionRecord
+	if ar.Verdict != config.ActionBlock {
+		t.Fatalf("v1 verdict = %q, want %q", ar.Verdict, config.ActionBlock)
+	}
+	if ar.Transport != transportMCPStdio {
+		t.Fatalf("v1 transport = %q, want %q", ar.Transport, transportMCPStdio)
+	}
+	if ar.Target != "response:42" {
+		t.Fatalf("v1 target = %q, want response:42", ar.Target)
+	}
+
+	v2s := mcpV2Receipts(t, h)
+	if len(v2s) != 1 {
+		t.Fatalf("got %d v2 receipts, want 1", len(v2s))
+	}
+	if err := contractreceipt.VerifyWithKey(v2s[0], h.pub, h.kid); err != nil {
+		t.Fatalf("v2 receipt verify: %v", err)
+	}
+	if v2s[0].PolicyHash != mcpTestPolicyHash {
+		t.Fatalf("policy_hash = %q, want %q", v2s[0].PolicyHash, mcpTestPolicyHash)
+	}
+	var payload struct {
+		ActionType string `json:"action_type"`
+		Transport  string `json:"transport"`
+		Target     string `json:"target"`
+	}
+	if err := json.Unmarshal(v2s[0].Payload, &payload); err != nil {
+		t.Fatalf("unmarshal v2 payload: %v", err)
+	}
+	if payload.ActionType != "mcp_tool_call" {
+		t.Fatalf("action_type = %q, want mcp_tool_call", payload.ActionType)
+	}
+	if payload.Transport != transportMCPStdio {
+		t.Fatalf("transport = %q, want %q", payload.Transport, transportMCPStdio)
+	}
+	if payload.Target != "response:42" {
+		t.Fatalf("target = %q, want response:42", payload.Target)
 	}
 }
 
