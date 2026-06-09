@@ -24,6 +24,9 @@ import sys
 from typing import IO, Any
 
 from .appraise import (
+    RISK_CHAIN_LINK_NOT_CONTIGUOUS_CHAIN,
+    RISK_SIGNATURE_VALID_NOT_TRANSPARENCY,
+    RISK_SVID_IDENTITY_NOT_DEPLOYMENT_NON_BYPASS,
     TrustEntry,
     VerifyOptions,
     comparable_appraisal,
@@ -223,14 +226,58 @@ def _run_aarp(
     return EXIT_OK
 
 
+# AARP defines six axes; the human view reports covered axes against this
+# denominator so a reader sees how narrow the evidence is, never just how broad.
+_TOTAL_AXES = 6
+
+
+def _overclaim_risk_sentence(code: str) -> str:
+    """Map a stable overclaim-risk code to a one-line explanation, mirroring the
+    Go CLI's overclaimRiskSentence. An unmapped code (a verifier ahead of this
+    CLI) falls back to the bare code so the warning is never silently dropped.
+    """
+    if code == RISK_SIGNATURE_VALID_NOT_TRANSPARENCY:
+        return (
+            "a valid signature is integrity over the assertion bytes, not proof "
+            "the receipt was witnessed by an external transparency log"
+        )
+    if code == RISK_SVID_IDENTITY_NOT_DEPLOYMENT_NON_BYPASS:
+        return (
+            "a verified signing-workload identity does not prove the deployment "
+            "forced the workload's traffic through the mediator"
+        )
+    if code == RISK_CHAIN_LINK_NOT_CONTIGUOUS_CHAIN:
+        return (
+            "a present chain link is a single position, not a verified contiguous "
+            "stream (verify the stream with --chain)"
+        )
+    return code
+
+
 def _emit_human(stdout: IO[str], ap: Any) -> None:
+    """Render the appraisal LIMITATIONS-first: does_not_assert and overclaim_risks
+    lead, before the verified claims, so the first thing a reader sees is what the
+    evidence does NOT prove.
+    """
     stdout.write(f"AARP appraisal ({ap.profile})\n")
-    stdout.write(f"  assertion_signed:   {str(ap.assertion_signed).lower()}\n")
+    stdout.write(f"  assertion_signed: {str(ap.assertion_signed).lower()}\n")
+    stdout.write("  does_not_assert (this appraisal never proves):\n")
+    for d in sorted(ap.does_not_assert):
+        stdout.write(f"    - {d}\n")
+    if ap.overclaim_risks:
+        stdout.write(
+            "  overclaim_risks (do not read more into the evidence than this):\n"
+        )
+        for r in sorted(ap.overclaim_risks):
+            stdout.write(f"    - {r}: {_overclaim_risk_sentence(r)}\n")
+    stdout.write("  --- what the evidence mechanically supports ---\n")
     stdout.write(f"  verified_claims:    {ap.verified_claims}\n")
     stdout.write(f"  claimed_unverified: {ap.claimed_unverified}\n")
+    axes = ap.assurance.axes_with_verified_claims
+    covered = ", ".join(axes) if axes else "(none)"
+    stdout.write(f"  evidence covers axes: {covered} ({len(axes)} of {_TOTAL_AXES})\n")
     for s in ap.signatures:
         stdout.write(f"  signature {s.key_id}/{s.alg}: {s.status}\n")
-    stdout.write(f"  does_not_assert:    {ap.does_not_assert}\n")
 
 
 def _run_receipt(stdout: IO[str], target: str, key_hex: str, json_mode: bool) -> int:
