@@ -273,6 +273,65 @@ func (s *Server) initConductorBundlePoller(cfg *config.Config, stderr io.Writer)
 	return nil
 }
 
+// buildConductorStaleEnforcer wires the follower-side stale-bundle enforcer. It
+// is the runtime consumer of applycache.DecideStale: a ticker re-evaluates the
+// active bundle's age each poll interval and, under a strict_deny_all policy,
+// engages the kill switch's conductor_stale source to fail closed when the
+// bundle ages past its grace window (or cannot be read). The enforcer shares the
+// follower poll interval so staleness is re-checked on the same cadence the
+// poller fetches; a missing/corrupt active bundle fails closed.
+func (s *Server) buildConductorStaleEnforcer(cfg *config.Config, ks *killswitch.Controller, logWriter io.Writer) (*applycache.StaleEnforcer, error) {
+	if cfg == nil || !cfg.Conductor.Enabled {
+		return nil, nil
+	}
+	cache, _ := s.conductorApply.(*applycache.Cache)
+	if cache == nil {
+		// conductor.enabled with no apply cache is a wiring error: the apply
+		// cache is built in initConductorApplyAndAudit, which runs first. Fail
+		// closed rather than launching an enforcer that can never read a bundle.
+		return nil, applycache.ErrCacheRequired
+	}
+	interval, err := time.ParseDuration(cfg.Conductor.PollInterval)
+	if err != nil {
+		return nil, fmt.Errorf("parsing conductor stale check interval: %w", err)
+	}
+	if logWriter == nil {
+		logWriter = io.Discard
+	}
+	logger := slog.New(slog.NewJSONHandler(logWriter, &slog.HandlerOptions{Level: slog.LevelInfo})).
+		With("service", "pipelock", "component", "conductor_stale_bundle")
+	return applycache.NewStaleEnforcer(applycache.StaleEnforcerConfig{
+		Cache:         cache,
+		KillSwitch:    ks,
+		Policy:        cfg.Conductor.StalePolicy,
+		CheckInterval: interval,
+		Now:           time.Now,
+		Logger:        logger,
+	})
+}
+
+// initConductorStaleEnforcer stores the stale enforcer on the Server so the
+// lifecycle can launch its Run loop alongside the other conductor pollers.
+// Mirrors initConductorBundlePoller. Must run after s.killswitch is set and
+// after initConductorApplyAndAudit has opened the apply cache.
+func (s *Server) initConductorStaleEnforcer(cfg *config.Config, ks *killswitch.Controller, stderr io.Writer) error {
+	enforcer, err := s.buildConductorStaleEnforcer(cfg, ks, stderr)
+	if err != nil {
+		return err
+	}
+	if enforcer != nil {
+		s.conductorStale = enforcer
+		// Record whether the stale policy is strict_deny_all so teardownConductor
+		// can fail closed when the enforcer is cancelled on entitlement loss. Set
+		// only alongside a live enforcer (conductor enabled), so a disabled or
+		// continue_last_known_good follower never engages stale-deny at teardown.
+		if cfg.Conductor.StalePolicy.AfterGrace == config.ConductorStaleStrictDenyAll {
+			s.conductorStaleStrictDeny.Store(true)
+		}
+	}
+	return nil
+}
+
 func buildConductorTrustResolver(cfg config.Conductor, now func() time.Time) (conductor.SignatureKeyResolver, error) {
 	if now == nil {
 		now = time.Now
