@@ -5,6 +5,7 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -19,6 +20,25 @@ import (
 	"github.com/luckyPipewrench/pipelock/internal/mcp/transport"
 	session "github.com/luckyPipewrench/pipelock/internal/session"
 )
+
+func emitRequestScopedTimeout(
+	respReader transport.MessageReader,
+	writer transport.MessageWriter,
+	logW io.Writer,
+	tracker *RequestTracker,
+	id json.RawMessage,
+	logMessage string,
+) {
+	if c, ok := respReader.(io.Closer); ok {
+		_ = c.Close()
+	}
+	if len(id) != 0 && (tracker == nil || tracker.Validate(id)) {
+		if wErr := writer.WriteMessage(timeoutErrorResponse(id)); wErr != nil {
+			_, _ = fmt.Fprintf(logW, "pipelock: failed to send timeout response: %v\n", wErr)
+		}
+	}
+	_, _ = fmt.Fprintln(logW, logMessage)
+}
 
 // RunHTTPProxy bridges stdio (client) to an upstream HTTP MCP server with
 // bidirectional scanning. Reads JSON-RPC from clientIn, POSTs to upstreamURL,
@@ -220,8 +240,18 @@ func RunHTTPProxy(
 							}
 							return
 						}
+						respReader = fwdOpts.withResponseTimeout(respReader)
 						_, scanErr := ForwardScanned(respReader, safeClientOut, safeLogW, tracker, fwdOpts)
-						if scanErr != nil {
+						if errors.Is(scanErr, transport.ErrResponseTimeout) {
+							emitRequestScopedTimeout(
+								respReader,
+								safeClientOut,
+								safeLogW,
+								tracker,
+								deferredReq.ID,
+								"pipelock: upstream response timeout on deferred request; failed request closed",
+							)
+						} else if scanErr != nil {
 							_, _ = fmt.Fprintf(safeLogW, "pipelock: scan error: %v\n", scanErr)
 						}
 					default:
@@ -316,8 +346,22 @@ func RunHTTPProxy(
 			continue
 		}
 
-		// Scan and forward response.
+		// Scan and forward response. Apply the optional per-read response
+		// timeout (no-op when disabled) so a hung HTTP upstream fails closed.
+		respReader = fwdOpts.withResponseTimeout(respReader)
 		_, scanErr := ForwardScanned(respReader, safeClientOut, safeLogW, tracker, fwdOpts)
+		if errors.Is(scanErr, transport.ErrResponseTimeout) {
+			emitRequestScopedTimeout(
+				respReader,
+				safeClientOut,
+				safeLogW,
+				tracker,
+				frame.ID,
+				"pipelock: upstream response timeout; failed request closed, session continues",
+			)
+			lastScanErr = scanErr
+			continue
+		}
 		if scanErr != nil {
 			_, _ = fmt.Fprintf(safeLogW, "pipelock: scan error: %v\n", scanErr)
 			lastScanErr = scanErr

@@ -19,6 +19,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/luckyPipewrench/pipelock/internal/config"
 	contractreceipt "github.com/luckyPipewrench/pipelock/internal/contract/receipt"
@@ -3702,5 +3703,248 @@ func (m *mockRecorderEscalateOnClean) RecordClean(decay float64) {
 	m.cleans++
 	if m.cleans >= m.escalateAt {
 		m.level = 1
+	}
+}
+
+// TestForwardScanned_ResponseTimeoutReturnsSentinel verifies that a dead
+// upstream (sends nothing) returns the timeout sentinel instead of hanging the
+// agent indefinitely. The owning transport emits pending timeout responses
+// after it stops request intake.
+func TestForwardScanned_ResponseTimeout(t *testing.T) {
+	sc := testScannerWithAction(t, "warn")
+	tracker := NewRequestTracker()
+	// Simulate a pending request whose response we are waiting for.
+	tracker.Track(json.RawMessage(`42`))
+
+	// blockingReader never returns a message until we tell it to.
+	ch := make(chan transport.ReadResult, 1)
+	br := &chanReader{ch: ch}
+
+	// Wrap with a short timeout.
+	tr := transport.NewTimeoutReader(br, 50*time.Millisecond)
+
+	var out, logBuf bytes.Buffer
+	opts := buildTestOpts(sc)
+	_, err := ForwardScanned(tr, transport.NewStdioWriter(&out), &logBuf, tracker, opts)
+	// Timeout is terminal: ForwardScanned returns the sentinel so the owning
+	// transport tears down the hung upstream instead of treating it as a clean
+	// EOF (which would block RunProxy on cmd.Wait() / loop the HTTP bridge).
+	if !errors.Is(err, transport.ErrResponseTimeout) {
+		t.Fatalf("expected ErrResponseTimeout, got: %v", err)
+	}
+
+	if out.Len() != 0 {
+		t.Fatalf("ForwardScanned must not emit timeout responses directly; got: %s", out.String())
+	}
+	if got := tracker.DrainPending(); len(got) != 1 || string(got[0]) != `42` {
+		t.Fatalf("ForwardScanned must leave pending ids for the owner to drain; got %q", got)
+	}
+	if !strings.Contains(logBuf.String(), "upstream response timeout") {
+		t.Fatalf("expected timeout log, got: %s", logBuf.String())
+	}
+
+	// Push a late response to unblock the goroutine so it does not leak.
+	ch <- transport.ReadResult{Err: io.EOF}
+}
+
+func TestEmitPendingTimeoutResponses_DrainsTracker(t *testing.T) {
+	tracker := NewRequestTracker()
+	tracker.Track(json.RawMessage(`1`))
+	tracker.Track(json.RawMessage(`2`))
+
+	var out, logBuf bytes.Buffer
+	emitPendingTimeoutResponses(transport.NewStdioWriter(&out), &logBuf, tracker)
+
+	outStr := out.String()
+	for _, want := range []string{`"id":1`, `"id":2`, `"code":-32000`, "upstream response timeout"} {
+		if !strings.Contains(outStr, want) {
+			t.Fatalf("timeout output missing %q: %s", want, outStr)
+		}
+	}
+	if got := tracker.DrainPending(); len(got) != 0 {
+		t.Fatalf("tracker still has pending ids after drain: %q", got)
+	}
+}
+
+func TestEmitRequestScopedTimeout(t *testing.T) {
+	tests := []struct {
+		name    string
+		id      json.RawMessage
+		trackID bool
+		wantOut string
+	}{
+		{name: "tracked request", id: json.RawMessage(`7`), trackID: true, wantOut: `"id":7`},
+		{name: "explicit null id", id: json.RawMessage(jsonrpc.Null), wantOut: `"id":null`},
+		{name: "notification without id", id: nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tracker := NewRequestTracker()
+			if tt.trackID {
+				tracker.Track(tt.id)
+			}
+			reader := &closeTrackingReader{}
+			var out, logBuf bytes.Buffer
+
+			emitRequestScopedTimeout(
+				reader,
+				transport.NewStdioWriter(&out),
+				&logBuf,
+				tracker,
+				tt.id,
+				"pipelock: upstream response timeout; failed request closed, session continues",
+			)
+
+			if !reader.closed {
+				t.Fatal("expected response reader to be closed")
+			}
+			if tt.wantOut == "" {
+				if out.Len() != 0 {
+					t.Fatalf("notification should not receive a response, got: %s", out.String())
+				}
+			} else {
+				for _, want := range []string{tt.wantOut, `"code":-32000`} {
+					if !strings.Contains(out.String(), want) {
+						t.Fatalf("timeout response missing %q: %s", want, out.String())
+					}
+				}
+			}
+			if !strings.Contains(logBuf.String(), "upstream response timeout") {
+				t.Fatalf("expected timeout log, got: %s", logBuf.String())
+			}
+		})
+	}
+}
+
+// chanReader is a MessageReader that returns results from a channel. Used
+// to simulate a dead upstream that never sends data.
+type chanReader struct {
+	ch chan transport.ReadResult
+}
+
+func (cr *chanReader) ReadMessage() ([]byte, error) {
+	r := <-cr.ch
+	return r.Msg, r.Err
+}
+
+type closeTrackingReader struct {
+	closed bool
+}
+
+func (*closeTrackingReader) ReadMessage() ([]byte, error) {
+	return nil, io.EOF
+}
+
+func (r *closeTrackingReader) Close() error {
+	r.closed = true
+	return nil
+}
+
+// TestWithResponseTimeout proves the shared helper used by BOTH stdio-fronted
+// transports (the subprocess proxy and the stdio-to-HTTP bridge) wraps the
+// upstream reader only when response_timeout_seconds is positive, reads through
+// the hot-reload-aware accessor, and is a no-op (identity) when disabled.
+func TestWithResponseTimeout(t *testing.T) {
+	base := &chanReader{ch: make(chan transport.ReadResult, 1)}
+
+	tests := []struct {
+		name     string
+		opts     MCPProxyOpts
+		wantWrap bool
+	}{
+		{"disabled (zero)", MCPProxyOpts{InputCfg: &InputScanConfig{ResponseTimeoutSeconds: 0}}, false},
+		{"nil input cfg", MCPProxyOpts{}, false},
+		{"enabled", MCPProxyOpts{InputCfg: &InputScanConfig{ResponseTimeoutSeconds: 5}}, true},
+		{"enabled via hot-reload fn", MCPProxyOpts{InputCfgFn: func() *InputScanConfig {
+			return &InputScanConfig{ResponseTimeoutSeconds: 5}
+		}}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tt.opts.withResponseTimeout(base)
+			_, wrapped := got.(*transport.TimeoutReader)
+			if wrapped != tt.wantWrap {
+				t.Fatalf("withResponseTimeout wrapped=%v, want %v", wrapped, tt.wantWrap)
+			}
+			if !tt.wantWrap && got != transport.MessageReader(base) {
+				t.Fatal("disabled timeout must return the original reader unchanged")
+			}
+		})
+	}
+}
+
+// TestRunProxy_ResponseTimeoutTerminatesHungUpstream proves the timeout is a
+// TERMINAL fail-closed teardown, not a clean-EOF break: a subprocess that
+// accepts a request and never replies must not hang RunProxy on cmd.Wait().
+// Without the kill-before-Wait, RunProxy blocks for the full sleep and the
+// deadline below fires.
+func TestRunProxy_ResponseTimeoutTerminatesHungUpstream(t *testing.T) {
+	sc := testScannerWithAction(t, "warn")
+	opts := buildTestOpts(sc)
+	opts.InputCfg = &InputScanConfig{
+		Action:                 config.ActionWarn,
+		OnParseError:           config.ActionBlock,
+		ResponseTimeoutSeconds: 1,
+	}
+
+	var out, logBuf bytes.Buffer
+	done := make(chan error, 1)
+	go func() {
+		// "sleep" never reads stdin and never writes stdout: a dead upstream.
+		done <- RunProxy(context.Background(),
+			strings.NewReader(mcpToolCall(mcpAllowedTool, "")+"\n"),
+			&out, &logBuf, []string{"sleep", "30"}, opts)
+	}()
+
+	select {
+	case <-done:
+		// Returned: the hung child was killed before cmd.Wait(). Good.
+	case <-time.After(15 * time.Second):
+		t.Fatal("RunProxy hung after upstream response timeout (cmd.Wait blocked on a live child)")
+	}
+
+	if !strings.Contains(logBuf.String(), "upstream response timeout") {
+		t.Fatalf("expected upstream response timeout log, got: %s", logBuf.String())
+	}
+}
+
+// TestRunProxy_ResponseTimeoutReturnsWithOpenClientInput covers the real agent
+// posture: the client writes one request, then keeps stdin open while waiting
+// for a response. A timeout must fail closed and return; it must not hang while
+// waiting for the input-scanner goroutine to observe EOF.
+func TestRunProxy_ResponseTimeoutReturnsWithOpenClientInput(t *testing.T) {
+	sc := testScannerWithAction(t, "warn")
+	opts := buildTestOpts(sc)
+	opts.InputCfg = &InputScanConfig{
+		Action:                 config.ActionWarn,
+		OnParseError:           config.ActionBlock,
+		ResponseTimeoutSeconds: 1,
+	}
+
+	clientIn, clientWriter := io.Pipe()
+	t.Cleanup(func() { _ = clientWriter.Close() })
+
+	var out, logBuf bytes.Buffer
+	done := make(chan error, 1)
+	go func() {
+		done <- RunProxy(context.Background(), clientIn, &out, &logBuf, []string{"sleep", "30"}, opts)
+	}()
+
+	_, _ = clientWriter.Write([]byte(mcpToolCall(mcpAllowedTool, "") + "\n"))
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, transport.ErrResponseTimeout) {
+			t.Fatalf("RunProxy error = %v, want ErrResponseTimeout", err)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("RunProxy hung after timeout while client input stayed open")
+	}
+
+	if !strings.Contains(out.String(), `"code":-32000`) {
+		t.Fatalf("expected timeout error response, got stdout: %s", out.String())
+	}
+	if !strings.Contains(logBuf.String(), "upstream response timeout") {
+		t.Fatalf("expected upstream response timeout log, got: %s", logBuf.String())
 	}
 }

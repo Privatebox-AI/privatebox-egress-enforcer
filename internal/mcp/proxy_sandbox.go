@@ -135,11 +135,26 @@ func RunProxyWithSandbox(ctx context.Context, sandboxCmd *exec.Cmd, clientIn io.
 		}
 	}()
 
-	serverReader := transport.NewStdioReader(serverOut)
 	fwdOpts := inputOpts
 	fwdOpts.ToolCfg = fwdToolCfg // session-specific baseline
 	fwdOpts.ToolCfgFn = nil
+	// Apply the optional per-read response timeout (no-op when disabled) so a
+	// hung sandboxed upstream fails closed instead of hanging the agent.
+	serverReader := fwdOpts.withResponseTimeout(transport.NewStdioReader(serverOut))
 	_, scanErr := ForwardScanned(serverReader, safeClientOut, safeLogW, tracker, fwdOpts)
+	timedOut := errors.Is(scanErr, transport.ErrResponseTimeout)
+
+	// On an upstream response timeout the sandboxed child is still alive; kill
+	// it before Wait() so Wait() returns instead of blocking forever, then fall
+	// through to the existing sandbox teardown below.
+	if timedOut && sandboxCmd.Process != nil {
+		_, _ = fmt.Fprintf(safeLogW, "pipelock: terminating sandboxed MCP subprocess after upstream response timeout\n")
+		if c, ok := clientIn.(io.Closer); ok {
+			_ = c.Close()
+		}
+		_ = serverIn.Close()
+		_ = sandboxCmd.Process.Signal(os.Kill)
+	}
 
 	waitErr := sandboxCmd.Wait()
 
@@ -167,6 +182,9 @@ func RunProxyWithSandbox(ctx context.Context, sandboxCmd *exec.Cmd, clientIn io.
 	select {
 	case <-done:
 	case <-drainCtx.Done():
+	}
+	if timedOut {
+		emitPendingTimeoutResponses(safeClientOut, safeLogW, tracker)
 	}
 
 	if scanErr != nil {
