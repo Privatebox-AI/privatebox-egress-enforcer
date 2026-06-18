@@ -31,6 +31,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/luckyPipewrench/pipelock/internal/playground"
 	"github.com/luckyPipewrench/pipelock/internal/playground/llmagent"
 	"github.com/luckyPipewrench/pipelock/internal/proxy"
 )
@@ -191,13 +192,13 @@ func buildAgent(cfg config, apiKey string, emit func(llmagent.Event)) (*llmagent
 	if err != nil {
 		return nil, err
 	}
-	modelAuthority, err := authorityFromHTTPURL(cfg.modelBaseURL)
+	modelHost, err := hostnameFromHTTPURL(cfg.modelBaseURL)
 	if err != nil {
 		return nil, err
 	}
 	tools := llmagent.LabToolsWithConfig(client, map[string]string{proxy.AgentHeader: cfg.actor}, llmagent.ToolRuntimeConfig{
 		Canary:       cfg.canary,
-		BlockedHosts: []string{modelAuthority},
+		BlockedHosts: []string{modelHost},
 	})
 	mc := llmagent.ModelConfig{
 		BaseURL:      cfg.modelBaseURL,
@@ -210,15 +211,13 @@ func buildAgent(cfg config, apiKey string, emit func(llmagent.Event)) (*llmagent
 	return llmagent.New(mc, client, tools, emit), nil
 }
 
-func authorityFromHTTPURL(raw string) (string, error) {
-	u, err := url.Parse(raw)
+func hostnameFromHTTPURL(raw string) (string, error) {
+	u, err := playground.ValidatePlainHTTPURL(raw)
 	if err != nil {
-		return "", fmt.Errorf("parse model base url: %w", err)
+		return "", fmt.Errorf("model base url: %w", err)
 	}
-	if u.Host == "" {
-		return "", fmt.Errorf("model base url host is required")
-	}
-	return u.Host, nil
+	host := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
+	return host, nil
 }
 
 func buildClient(proxyURL string, timeout time.Duration) (*http.Client, error) {
@@ -243,7 +242,13 @@ func buildClient(proxyURL string, timeout time.Duration) (*http.Client, error) {
 		base := &net.Dialer{Timeout: timeout}
 		tr.DialContext = proxyOnlyDialContext(proxyDialAddr(u), base.DialContext)
 	}
-	return &http.Client{Transport: tr, Timeout: timeout}, nil
+	return &http.Client{
+		Transport: tr,
+		Timeout:   timeout,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}, nil
 }
 
 type dialFunc func(ctx context.Context, network, addr string) (net.Conn, error)
@@ -273,18 +278,8 @@ func proxyOnlyDialContext(want string, base dialFunc) dialFunc {
 }
 
 func validateHTTPURL(name, raw string) error {
-	u, err := url.Parse(raw)
-	if err != nil {
-		return fmt.Errorf("%s: parse: %w", name, err)
-	}
-	if u.Scheme != "http" && u.Scheme != "https" {
-		return fmt.Errorf("%s: must use http or https", name)
-	}
-	if u.Host == "" {
-		return fmt.Errorf("%s: host is required", name)
-	}
-	if u.User != nil {
-		return fmt.Errorf("%s: must not include credentials", name)
+	if _, err := playground.ValidatePlainHTTPURL(raw); err != nil {
+		return fmt.Errorf("%s: %w", name, err)
 	}
 	return nil
 }

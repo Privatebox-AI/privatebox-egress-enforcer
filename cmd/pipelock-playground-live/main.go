@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -252,6 +253,38 @@ func validateServeSafety(f *serveFlags, modelBacked bool) error {
 	if modelBacked && !f.dev && f.dailyTurnBudget <= 0 {
 		return errors.New("model-backed public serve requires --daily-turn-budget > 0 (or --dev for local testing)")
 	}
+	if err := validateAllowOrigin(f.allowOrigin, f.dev); err != nil {
+		return fmt.Errorf("--allow-origin: %w", err)
+	}
+	return nil
+}
+
+func validateAllowOrigin(raw string, dev bool) error {
+	if raw == "" {
+		return nil
+	}
+	if strings.TrimSpace(raw) != raw {
+		return errors.New("must not contain surrounding whitespace")
+	}
+	if raw == "*" {
+		if dev {
+			return nil
+		}
+		return errors.New("wildcard is only allowed with --dev")
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("parse: %w", err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return errors.New("must be an http(s) origin")
+	}
+	if u.Host == "" {
+		return errors.New("host is required")
+	}
+	if u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.Path != "" {
+		return errors.New("must be an origin only, like https://pipelab.org")
+	}
 	return nil
 }
 
@@ -283,6 +316,9 @@ func buildLLMAgentConfig(f *serveFlags) (*playground.LLMAgentConfig, error) {
 	}
 	if len(missing) > 0 {
 		return nil, fmt.Errorf("model-backed agent requires %s", strings.Join(missing, ", "))
+	}
+	if _, err := playground.ValidatePlainHTTPURL(f.modelBaseURL); err != nil {
+		return nil, fmt.Errorf("--model-base-url: %w", err)
 	}
 	return &playground.LLMAgentConfig{
 		Bin:          f.llmAgentBin,
