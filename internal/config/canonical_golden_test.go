@@ -190,7 +190,26 @@ const (
 	// Re-bumped for response_scanning.mcp_servers: per-server MCP response
 	// trust classes change response-injection enforcement from the fail-closed
 	// untrusted block default to explicit reasoning/warn.
-	goldenHashDefaults = "734ce147726792a7a9f0a3d4ff1dd6cecbd0dd3861a2e6adea5b232e80f7149a"
+	// Re-bumped for provider-key DLP precision: short `sk-*` suffix floors
+	// moved from 10 to 20 chars, provider-bound URL exemptions were added to
+	// the matching DLP patterns, and default suppress entries now exempt
+	// provider-bound request bodies/headers while preserving blocks to other
+	// destinations. Detection/enforcement-relevant change.
+	// Re-bumped for the second provider-key DLP expansion: five additional
+	// distinctively-prefixed AI provider-key shapes were added with provider
+	// host exemptions and default suppress entries. Detection/enforcement-
+	// relevant change.
+	// Re-bumped for dropping the FP-prone "Voice AI" (sk_car_) and "Neural
+	// Search" (jina_) default DLP patterns plus their suppress entries: their
+	// key formats are undisclosed so the prefixes false-positive on common
+	// identifiers. Detection/enforcement-relevant change.
+	// Re-bumped for the LLM Router (sk-or-v1-) DLP suffix tightening: the suffix
+	// charset dropped "-"/"_" (was matching hyphenated prose), a policy-semantic
+	// pattern change, so the hash shifts.
+	// Re-bumped again for the LLM Router suffix narrowing from alphanumeric to
+	// hex-only, matching the documented key shape and preventing long ordinary
+	// words after "sk-or-v1-" from false-positive matching.
+	goldenHashDefaults = "3fd8fa0662cde0ddaa694d2b2fb270b445a64cc527425dbaa9424051ac25e182"
 
 	// goldenHashRichConfig pins the hash for goldenRichYAML loaded via
 	// config.Load, post-ApplyDefaults + Validate. Covers a broad,
@@ -285,7 +304,14 @@ const (
 	// Re-bumped for response_scanning.mcp_servers: see goldenHashDefaults note
 	// above. The rich fixture omits the list, but the empty policy field is
 	// still part of the canonical view.
-	goldenHashRichConfig = "11a24da86ba9e0f1ed8686dbe8a2a44a1f48f3492d180b09cbcfd7ecd75d44cb"
+	// Re-bumped for provider-key DLP precision: see goldenHashDefaults note
+	// above. The rich fixture inherits the default DLP pattern and suppress
+	// sets, so the hash shifts in lockstep.
+	// Re-bumped for dropping the FP-prone "Voice AI" (sk_car_) and "Neural
+	// Search" (jina_) default DLP patterns + their suppress entries.
+	// Re-bumped for the LLM Router hex-only suffix narrowing: see
+	// goldenHashDefaults note above.
+	goldenHashRichConfig = "d01993539c02491ec0916460e1456011ee94c17ab903c42554ccd3ee5b082903"
 )
 
 // goldenRichYAML is the canonical fixture for goldenHashRichConfig. It
