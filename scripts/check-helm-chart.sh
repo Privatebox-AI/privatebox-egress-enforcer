@@ -97,7 +97,7 @@ fi
 
 # Digest-pinned examples must render repository@sha256:..., not a tag.
 for name in values-enterprise-conductor values-enterprise-follower; do
-  if ! grep -q -- 'image: "ghcr.io/luckypipewrench/pipelock@sha256:' "$render_dir/$name.yaml"; then
+  if ! grep -q -- 'image: "ghcr.io/privatebox-ai/privatebox-egress-enforcer@sha256:' "$render_dir/$name.yaml"; then
     echo "$name should render a digest-pinned image (repository@sha256:...)" >&2
     grep -- 'image:' "$render_dir/$name.yaml" >&2
     exit 1
