@@ -1,0 +1,157 @@
+name: Docker (Apache-only)
+
+# Builds and pushes the Apache-2.0-only image (Dockerfile.apache, no
+# -tags enterprise) to this fork's own GHCR namespace. Triggered on
+# version tags only, mirroring upstream's release trigger.
+#
+# Each pushed image gets:
+#   - an SBOM (CycloneDX, derived from go.mod/go.sum) attested to its digest
+#   - a SLSA build provenance attestation (this workflow run produced this
+#     digest from this commit)
+#   - a keyless cosign signature over its digest
+# All three are fail-closed: a failure in any step fails the job, since an
+# image that didn't get signed/attested is not the contract we want to ship.
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'  # Semver only — excludes floating tags like v1, v2
+
+permissions: {}
+
+jobs:
+  docker:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version: '1.25.11'
+          check-latest: true
+
+      - name: Run tests (no enterprise tag — confirms the shipped tree is Apache-only)
+        run: go test -race -count=1 ./...
+
+      - name: Build (no enterprise tag — confirms ELv2 packages never enter the build graph)
+        run: go build ./...
+
+      - name: Generate SBOM
+        run: |
+          go install github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@v1.9.0
+          cyclonedx-gomod mod -json -output sbom.cdx.json
+
+      - name: Set image metadata
+        id: meta
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          echo "version=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "build_date=$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_OUTPUT"
+          echo "image=ghcr.io/$(echo "${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+      - name: Login to GHCR
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@ce360397dd3f832beb865e1373c09c0e9f86d70a # v4.0.0
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: 'v2.6.1'
+
+      - name: Build and push
+        run: |
+          docker buildx build \
+            --platform linux/amd64,linux/arm64 \
+            -f Dockerfile.apache \
+            --build-arg VERSION="${{ steps.meta.outputs.version }}" \
+            --build-arg BUILD_DATE="${{ steps.meta.outputs.build_date }}" \
+            --build-arg GIT_COMMIT="${GITHUB_SHA}" \
+            -t "${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.version }}" \
+            -t "${{ steps.meta.outputs.image }}:latest" \
+            --metadata-file metadata.json \
+            --push .
+
+      - name: Get image digest
+        id: digest
+        run: |
+          DIGEST="$(jq -r '."containerimage.digest"' metadata.json)"
+          test -n "$DIGEST" && test "$DIGEST" != "null" || {
+            echo "::error::Could not resolve pushed image digest from buildx metadata"
+            exit 1
+          }
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        with:
+          subject-name: ${{ steps.meta.outputs.image }}
+          subject-digest: ${{ steps.digest.outputs.digest }}
+          push-to-registry: true
+
+      - name: Attest SBOM
+        uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
+        with:
+          subject-name: ${{ steps.meta.outputs.image }}
+          subject-digest: ${{ steps.digest.outputs.digest }}
+          sbom-path: sbom.cdx.json
+          push-to-registry: true
+
+      - name: Sign image
+        run: cosign sign --yes "${{ steps.meta.outputs.image }}@${{ steps.digest.outputs.digest }}"
+
+      - name: Build and push init image
+        run: |
+          docker buildx build \
+            --platform linux/amd64,linux/arm64 \
+            -f Dockerfile.init.apache \
+            --build-arg VERSION="${{ steps.meta.outputs.version }}" \
+            --build-arg BUILD_DATE="${{ steps.meta.outputs.build_date }}" \
+            --build-arg GIT_COMMIT="${GITHUB_SHA}" \
+            -t "${{ steps.meta.outputs.image }}-init:${{ steps.meta.outputs.version }}" \
+            -t "${{ steps.meta.outputs.image }}-init:latest" \
+            --metadata-file metadata-init.json \
+            --push .
+
+      - name: Get init image digest
+        id: init-digest
+        run: |
+          DIGEST="$(jq -r '."containerimage.digest"' metadata-init.json)"
+          test -n "$DIGEST" && test "$DIGEST" != "null" || {
+            echo "::error::Could not resolve pushed init image digest from buildx metadata"
+            exit 1
+          }
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+
+      - name: Attest init image build provenance
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        with:
+          subject-name: ${{ steps.meta.outputs.image }}-init
+          subject-digest: ${{ steps.init-digest.outputs.digest }}
+          push-to-registry: true
+
+      - name: Attest init image SBOM
+        uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
+        with:
+          subject-name: ${{ steps.meta.outputs.image }}-init
+          subject-digest: ${{ steps.init-digest.outputs.digest }}
+          sbom-path: sbom.cdx.json
+          push-to-registry: true
+
+      - name: Sign init image
+        run: cosign sign --yes "${{ steps.meta.outputs.image }}-init@${{ steps.init-digest.outputs.digest }}"
