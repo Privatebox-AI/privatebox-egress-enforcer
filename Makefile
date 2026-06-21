@@ -15,7 +15,7 @@ LDFLAGS := -ldflags "-s -w \
 	-X $(MODULE)/internal/license.PublicKeyHex=$(LICENSE_PUBLIC_KEY) \
 	-X $(MODULE)/internal/rules.KeyringHex=$(RULES_KEYRING_HEX)"
 
-.PHONY: all build build-verifier test bench bench-egress bench-egress-long bench-egress-release lint test-stability-check clean docker install fmt vet tidy-check fuzz stats docs-check \
+.PHONY: all build build-verifier test bench bench-egress bench-egress-long bench-egress-release lint test-stability-check clean docker docker-apache install fmt vet tidy-check fuzz stats docs-check \
 	test-runtime-critical test-replay-harness release-audit runtime-policy-audit debt-check release-check hermes-e2e
 
 all: build
@@ -113,6 +113,18 @@ docker:
 		--build-arg LICENSE_PUBLIC_KEY=$(LICENSE_PUBLIC_KEY) \
 		--build-arg RULES_KEYRING_HEX=$(RULES_KEYRING_HEX) \
 		-t $(BINARY):$(VERSION) -t $(BINARY):latest .
+
+# docker-apache builds the Apache-2.0-only image (no -tags enterprise; see
+# Dockerfile.apache). This is what we push to our own GHCR namespace.
+docker-apache:
+	docker build \
+		-f Dockerfile.apache \
+		--build-arg VERSION=$(VERSION) \
+		--build-arg BUILD_DATE=$(BUILD_DATE) \
+		--build-arg GIT_COMMIT=$(GIT_COMMIT) \
+		--build-arg LICENSE_PUBLIC_KEY=$(LICENSE_PUBLIC_KEY) \
+		--build-arg RULES_KEYRING_HEX=$(RULES_KEYRING_HEX) \
+		-t privatebox-egress-enforcer:$(VERSION) -t privatebox-egress-enforcer:latest .
 
 fuzz:
 	@echo "Running all fuzz targets (30s each)..."

@@ -17,7 +17,7 @@ services:
   # -- Production services (always run) ----------------------------------------
 
   pipelock:
-    image: ghcr.io/luckypipewrench/pipelock:${PIPELOCK_VERSION:-latest}
+    image: ghcr.io/privatebox-ai/privatebox-egress-enforcer:${PIPELOCK_VERSION:-latest}
     container_name: pipelock
     networks:
       - pipelock-internal
@@ -73,7 +73,7 @@ services:
 
   verify:
     profiles: ["verify"]
-    image: ghcr.io/luckypipewrench/pipelock-init:${PIPELOCK_VERSION:-latest}
+    image: ghcr.io/privatebox-ai/privatebox-egress-enforcer-init:${PIPELOCK_VERSION:-latest}
     container_name: verify
     networks:
       - pipelock-internal

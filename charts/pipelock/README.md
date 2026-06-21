@@ -26,7 +26,7 @@ The chart is configured by passing values to `helm install -f values.yaml`. The 
 
 | Key | Default | Description |
 |---|---|---|
-| `image.repository` | `ghcr.io/luckypipewrench/pipelock` | Image repository |
+| `image.repository` | `ghcr.io/privatebox-ai/privatebox-egress-enforcer` | Image repository |
 | `image.tag` | `""` | Tag used when `image.digest` is empty. Falls through to `.Chart.AppVersion` if also empty. |
 | `image.digest` | `""` | Optional multi-arch manifest digest. When set, the chart renders `repository@digest` for pinning |
 | `image.pullPolicy` | `IfNotPresent` | Image pull policy |
