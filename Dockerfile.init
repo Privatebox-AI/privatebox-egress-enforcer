@@ -1,5 +1,7 @@
 # Init container for K8s sidecar deployments.
 # Copies the pipelock binary to a shared volume for MCP stdio wrapping.
+# Used by GoReleaser — copies the pre-built (enterprise-tagged) binary. For
+# an Apache-2.0-only equivalent built from source, see Dockerfile.init.apache.
 #
 # Usage in a pod spec:
 #   initContainers:

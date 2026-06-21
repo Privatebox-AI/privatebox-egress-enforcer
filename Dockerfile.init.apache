@@ -1,0 +1,37 @@
+# Apache-2.0-only init container for K8s sidecar deployments (MCP stdio
+# wrapping). Builds from source without -tags enterprise — same rationale
+# as Dockerfile.apache. Mirrors Dockerfile.init (the upstream/enterprise
+# equivalent, which copies a prebuilt binary instead of building it).
+#
+# Usage in a pod spec:
+#   initContainers:
+#     - name: pipelock-init
+#       image: ghcr.io/privatebox-ai/privatebox-egress-enforcer-init:latest
+#       command: ["cp", "/pipelock", "/shared-bin/pipelock"]
+#       volumeMounts:
+#         - name: shared-bin
+#           mountPath: /shared-bin
+FROM golang:1.26-alpine@sha256:f1ddd9fe14fffc091dd98cb4bfa999f32c5fc77d2f2305ea9f0e2595c5437c14 AS builder
+
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+ARG VERSION=0.1.0-dev
+ARG BUILD_DATE=unknown
+ARG GIT_COMMIT=unknown
+ARG TARGETOS=linux
+ARG TARGETARCH=amd64
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build \
+    -ldflags "-s -w \
+      -X github.com/luckyPipewrench/pipelock/internal/cliutil.Version=${VERSION} \
+      -X github.com/luckyPipewrench/pipelock/internal/cliutil.BuildDate=${BUILD_DATE} \
+      -X github.com/luckyPipewrench/pipelock/internal/cliutil.GitCommit=${GIT_COMMIT} \
+      -X github.com/luckyPipewrench/pipelock/internal/cliutil.GoVersion=$(go version | awk '{print $3}') \
+      -X github.com/luckyPipewrench/pipelock/internal/proxy.Version=${VERSION}" \
+    -o /pipelock ./cmd/pipelock
+
+FROM alpine:3.23@sha256:5b10f432ef3da1b8d4c7eb6c487f2f5a8f096bc91145e68878dd4a5019afde11
+COPY --from=builder /pipelock /pipelock
+USER 65534
