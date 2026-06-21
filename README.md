@@ -1,6 +1,4 @@
-<p align="center">
-  <img src="assets/pipelock-logo.svg" alt="Privatebox Egress Enforcer" width="200">
-</p>
+
 
 # Privatebox Egress Enforcer
 
